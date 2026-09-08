@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import codecs
 import re
 import unicodedata
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup, Tag
+from bs4.dammit import EncodingDetector
 
 from .errors import AccessChallengeError, ParseError, SessionExpiredError
 from .models import CaseMetadata, ValidatedUrl
@@ -45,7 +47,24 @@ def fold_text(value: str) -> str:
 
 def decode_html(content: bytes, content_type: str | None) -> str:
     charset_match = re.search(r"charset\s*=\s*['\"]?([^;\s'\"]+)", content_type or "", re.I)
-    candidates = [charset_match.group(1) if charset_match else None, "iso-8859-1", "utf-8"]
+    # A BOM takes precedence over HTTP headers; explicit declarations precede fallbacks.
+    bom_encoding = None
+    for markers, encoding in (
+        ((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE), "utf-32"),
+        ((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE), "utf-16"),
+        ((codecs.BOM_UTF8,), "utf-8-sig"),
+    ):
+        if content.startswith(markers):
+            bom_encoding = encoding
+            break
+    candidates = [
+        bom_encoding,
+        charset_match.group(1) if charset_match else None,
+        EncodingDetector.find_declared_encoding(content, is_html=True),
+        "utf-8",
+        "windows-1252",
+        "iso-8859-1",
+    ]
     for encoding in candidates:
         if not encoding:
             continue
