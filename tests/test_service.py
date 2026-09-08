@@ -98,6 +98,46 @@ def test_download_preserves_session_and_second_run_uses_no_network(
 
 
 @respx.mock
+@pytest.mark.parametrize("damage", ["missing", "truncated", "changed"])
+def test_recovers_damaged_pdf_without_duplicate_document(tmp_path, valid_pdf, damage) -> None:
+    page_route = respx.get(PUBLIC_URL).mock(return_value=page_response())
+    pdf_route = respx.get(DOWNLOAD_URL).respond(
+        200, content=valid_pdf, headers={"Content-Type": "application/pdf"}
+    )
+    service = ScraperService(make_test_config(tmp_path))
+    first = service.scrape_url(PUBLIC_URL)
+    with sqlite3.connect(service.paths.database) as database:
+        document_id = database.execute("SELECT document_id FROM documents").fetchone()[0]
+
+    if damage == "missing":
+        first.pdf_path.unlink()
+    elif damage == "truncated":
+        first.pdf_path.write_bytes(valid_pdf[:-20])
+    else:
+        # Keep the PDF readable and the size unchanged, but alter its fingerprint.
+        tampered = bytearray(valid_pdf)
+        tampered[7] = ord("4") if tampered[7] != ord("4") else ord("5")
+        first.pdf_path.write_bytes(tampered)
+
+    recovered = service.scrape_url(PUBLIC_URL)
+    cached = service.scrape_url(PUBLIC_URL)
+
+    assert recovered.status == "downloaded"
+    assert recovered.sha256 == first.sha256
+    assert recovered.pdf_path.read_bytes() == valid_pdf
+    assert cached.status == "already_exists"
+    assert cached.pdf_path == recovered.pdf_path
+    assert page_route.call_count == pdf_route.call_count == 2
+    assert list(service.paths.pdfs.rglob("*.pdf")) == [recovered.pdf_path]
+    assert list(service.paths.tmp.iterdir()) == []
+    with sqlite3.connect(service.paths.database) as database:
+        assert database.execute(
+            "SELECT document_id, validation_status, validation_error FROM documents"
+        ).fetchall() == [(document_id, "valid", None)]
+        assert database.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+@respx.mock
 def test_refresh_with_same_pdf_returns_unchanged(tmp_path, valid_pdf: bytes) -> None:
     page_route = respx.get(PUBLIC_URL).mock(return_value=page_response())
     pdf_route = respx.get(DOWNLOAD_URL).mock(

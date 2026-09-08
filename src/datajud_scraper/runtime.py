@@ -663,12 +663,22 @@ class Database:
         original_filename: str | None,
     ) -> str:
         document_id = str(uuid.uuid4())
-        self.connection.execute(
+        cursor = self.connection.execute(
             """
             INSERT INTO documents(
                 document_id, case_id, retrieved_at, relative_path, sha256,
                 size_bytes, mime_type, page_count, original_filename
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(case_id, sha256) DO UPDATE SET
+                retrieved_at = excluded.retrieved_at,
+                relative_path = excluded.relative_path,
+                size_bytes = excluded.size_bytes,
+                mime_type = excluded.mime_type,
+                page_count = excluded.page_count,
+                original_filename = excluded.original_filename,
+                validation_status = 'valid',
+                validation_error = NULL
+            WHERE documents.validation_status = 'invalid'
             """,
             (
                 document_id,
@@ -682,8 +692,14 @@ class Database:
                 original_filename,
             ),
         )
+        if cursor.rowcount != 1:
+            raise sqlite3.IntegrityError("el documento ya tiene una copia valida")
         self.connection.commit()
-        return document_id
+        row = self.connection.execute(
+            "SELECT document_id FROM documents WHERE case_id = ? AND sha256 = ?",
+            (case_id, sha256),
+        ).fetchone()
+        return row["document_id"]
 
     def mark_document_invalid(self, document_id: str, error_code: str) -> None:
         self.connection.execute(
