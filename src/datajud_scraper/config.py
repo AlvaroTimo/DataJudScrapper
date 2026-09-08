@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
-DEFAULT_STORAGE_ROOT = Path("/mnt/hdd/datajud-scraper")
+DEFAULT_STORAGE_ROOT = Path("data")
 DEFAULT_USER_AGENT = "DataJudScraper/0.1 (responsible PROJUDI/TJBA client)"
 
 
@@ -29,22 +30,68 @@ class ScraperConfig:
     challenge_cooldown_seconds: int = 3600
 
     @classmethod
-    def from_env(cls, storage_root: str | Path | None = None) -> ScraperConfig:
-        env_root = os.environ.get("DATAJUD_STORAGE_ROOT")
-        root = Path(storage_root or env_root or DEFAULT_STORAGE_ROOT)
-        user_agent = os.environ.get("DATAJUD_USER_AGENT", DEFAULT_USER_AGENT)
-        return cls(storage_root=root, user_agent=user_agent).normalized()
+    def from_env(
+        cls,
+        storage_root: str | Path | None = None,
+        **overrides: str | int | float | None,
+    ) -> ScraperConfig:
+        """Resolve explicit options, then DATAJUD_* variables, then defaults."""
+        options = {"storage_root": storage_root, **overrides}
+        known = {item.name for item in fields(cls)}
+        unknown = options.keys() - known
+        if unknown:
+            raise ValueError(f"configuracion desconocida: {', '.join(sorted(unknown))}")
+        values = {}
+        for item in fields(cls):
+            variable = f"DATAJUD_{item.name.upper()}"
+            value = options.get(item.name)
+            source = f"--{item.name.replace('_', '-')}"
+            if value is None:
+                value = os.environ.get(variable)
+                source = variable
+            if value is None:
+                continue
+            converter = Path if item.name == "storage_root" else type(item.default)
+            try:
+                if isinstance(value, str) and not value.strip():
+                    raise ValueError("valor vacio")
+                values[item.name] = (
+                    converter(value)
+                    if isinstance(value, str) or item.name == "storage_root"
+                    else value
+                )
+            except (ValueError, TypeError, OverflowError) as exc:
+                raise ValueError(f"valor invalido para {source}") from exc
+        return cls(**values).normalized()
 
     def normalized(self) -> ScraperConfig:
         root = self.storage_root.expanduser().resolve(strict=False)
-        if not root.is_absolute():
-            raise ValueError("storage_root debe ser una ruta absoluta")
-        if self.min_request_interval_seconds < 0 or self.max_request_jitter_seconds < 0:
-            raise ValueError("los intervalos de peticiones no pueden ser negativos")
-        if self.max_html_bytes <= 0 or self.max_pdf_bytes <= 0:
-            raise ValueError("los limites de tamano deben ser positivos")
-        if self.page_attempts < 1 or self.pdf_attempts < 1:
-            raise ValueError("debe existir al menos un intento HTTP")
-        if self.challenge_cooldown_seconds < 0:
-            raise ValueError("el cooldown de desafios no puede ser negativo")
+        if not self.user_agent.strip() or any(
+            ord(char) < 32 or ord(char) > 126 for char in self.user_agent
+        ):
+            raise ValueError("user_agent debe ser texto ASCII no vacio sin caracteres de control")
+        positive = {
+            "connect_timeout_seconds",
+            "page_timeout_seconds",
+            "pdf_timeout_seconds",
+            "max_html_bytes",
+            "max_pdf_bytes",
+            "page_attempts",
+            "pdf_attempts",
+            "log_max_bytes",
+        }
+        for item in fields(self):
+            if not isinstance(item.default, (int, float)):
+                continue
+            value = getattr(self, item.name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or (isinstance(item.default, int) and not isinstance(value, int))
+                or (isinstance(value, float) and not math.isfinite(value))
+            ):
+                raise ValueError(f"{item.name} debe ser un numero finito del tipo correcto")
+            if value < 0 or (item.name in positive and value == 0):
+                bound = "positivo" if item.name in positive else "mayor o igual a cero"
+                raise ValueError(f"{item.name} debe ser {bound}")
         return replace(self, storage_root=root)
