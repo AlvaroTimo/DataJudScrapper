@@ -1,0 +1,68 @@
+{
+  "version_esquema": 2,
+  "generado_en": "2026-09-08T18:33:13+00:00",
+  "total_registros": 10713,
+  "fuentes": {
+    "projudi": "spider_links/test3.json",
+    "datajud": "3_dedup/eproc_activos_dedup.jsonl",
+    "html": "test3/dados_processo"
+  },
+  "filtro": {
+    "campo": "grupo",
+    "valor": "dados_processo"
+  },
+  "url_download": {
+    "plantilla": "https://projudi.tjba.jus.br/projudi/acoes/DownloadProcesso?numeroProcesso=<process_number>",
+    "identificador": "process_number público, con formato CNJ",
+    "verificada": false
+  },
+  "contexto_datajud": {
+    "tribunal": [
+      "TJBA"
+    ],
+    "sistema": [
+      "Eproc"
+    ],
+    "grau": [
+      "JE"
+    ],
+    "nivel_sigilo": [
+      0
+    ],
+    "coletado_em": [
+      "2026-09-01"
+    ]
+  },
+  "estadisticas": {
+    "datajud_subjects_vacios": 8,
+    "sin_links_detectados": 537,
+    "con_avisos": 1351
+  },
+  "cobertura_campos": {
+    "process_number": 10713,
+    "process_number_digits": 10713,
+    "process_year": 10713,
+    "source_url": 10713,
+    "codigo_hash": 0,
+    "projudi_internal_id": 10713,
+    "distribution_at": 10713,
+    "subject": 10712,
+    "is_secret": 10713
+  },
+  "segredo_justica": {
+    "publico": 10713,
+    "secreto": 0,
+    "desconocido": 0
+  },
+  "notas": {
+    "arquivos": "Recuentos de enlaces y mensajes de restricción en el HTML; no son documentos descargados ni garantías de acceso.",
+    "coletado_em": "Fecha de recopilación de DataJud, no de verificación en PROJUDI.",
+    "data_ajuizamento": "Fecha de presentación; se omite la hora del dato original.",
+    "distribution_at": "Data de Distribuição del HTML, interpretada en America/Bahia y convertida a UTC; no se sustituye por data_ajuizamento.",
+    "subject": "Assunto del HTML con su jerarquía; datajud_subjects conserva por separado la lista de asuntos de DataJud.",
+    "source_url": "URL de la página de origen del HTML, normalizada; url_download conserva el enlace de descarga construido.",
+    "codigo_hash": "Parámetro codigoHash de source_url, o null si no está presente.",
+    "is_secret": "Segredo de Justiça del HTML: false = público, true = secreto, null = desconocido; no se infiere del nivel de secreto de DataJud.",
+    "avisos": "Textos originales de tipo aviso; no son estados procesales inferidos."
+  }
+}
