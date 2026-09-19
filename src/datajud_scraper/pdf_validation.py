@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -56,6 +57,7 @@ def validate_pdf(
     *,
     expected_size: int | None = None,
     expected_sha256: str | None = None,
+    expected_process_number: str | None = None,
 ) -> PdfValidation:
     try:
         size = path.stat().st_size
@@ -89,6 +91,15 @@ def validate_pdf(
             if reader.is_encrypted and reader.decrypt("") == 0:
                 raise PdfValidationError("el PDF esta cifrado y no se puede validar")
             page_count = len(reader.pages)
+            if expected_process_number is not None:
+                first_page = reader.pages[0].extract_text() or ""
+                found = re.search(
+                    r"Processo\s*(?:n[º°o.]*)?\s*:?\s*(\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4})",
+                    first_page,
+                    re.I,
+                )
+                if not found or found.group(1) != expected_process_number:
+                    raise PdfValidationError("el encabezado del PDF no contiene el CNJ solicitado")
     except PdfValidationError:
         raise
     except Exception as exc:

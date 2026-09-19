@@ -43,7 +43,7 @@ def test_unknown_secrecy_returns_partial_metadata() -> None:
     assert metadata.is_secret is None
     assert metadata.subject is None
     assert metadata.distribution_at is None
-    assert metadata.projudi_internal_id is None
+    assert metadata.projudi_internal_id == "6020251285346"
 
 
 @pytest.mark.parametrize(
@@ -92,7 +92,7 @@ def test_secret_case_stops_before_other_fields() -> None:
     assert metadata.is_secret is True
     assert metadata.subject is None
     assert metadata.distribution_at is None
-    assert metadata.projudi_internal_id is None
+    assert metadata.projudi_internal_id == "6020251285346"
 
 
 def test_missing_subject_is_allowed_for_public_case() -> None:
@@ -111,7 +111,7 @@ def test_missing_subject_is_allowed_for_public_case() -> None:
 def test_public_case_still_requires_download_identifier() -> None:
     with pytest.raises(ParseError, match="identificador interno"):
         parse_case_page(
-            case_html(include_download=False),
+            case_html(include_download=False, include_header=False),
             "text/html;charset=iso-8859-1",
             validate_input_url(PUBLIC_URL),
         )
@@ -135,3 +135,30 @@ def test_rejects_untrusted_or_malformed_urls(url: str) -> None:
 def test_rejects_redirect_outside_projudi() -> None:
     with pytest.raises(InvalidInputError):
         validate_trusted_target("https://example.com/steal")
+
+
+def test_header_supplies_id_without_download_button():
+    from datajud_scraper.models import ValidatedUrl
+
+    metadata = parse_case_page(
+        case_html(include_download=False),
+        None,
+        ValidatedUrl(PUBLIC_URL, None),
+        expected_cnj=PROCESS_NUMBER,
+        expected_id="6020251285346",
+    )
+    assert metadata.projudi_internal_id == "6020251285346"
+
+
+def test_plain_cnj_text_cannot_replace_header_identity():
+    from datajud_scraper.errors import IdentityError
+    from datajud_scraper.models import ValidatedUrl
+
+    with pytest.raises(IdentityError):
+        parse_case_page(
+            case_html(include_header=False),
+            None,
+            ValidatedUrl(PUBLIC_URL, None),
+            expected_cnj=PROCESS_NUMBER,
+            expected_id="6020251285346",
+        )

@@ -4,12 +4,14 @@ import codecs
 import re
 import unicodedata
 from datetime import datetime, timezone
+from html import unescape
+from urllib.parse import parse_qsl, urlsplit
 from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup, Tag
 from bs4.dammit import EncodingDetector
 
-from .errors import AccessChallengeError, ParseError, SessionExpiredError
+from .errors import AccessChallengeError, IdentityError, ParseError, SessionExpiredError
 from .models import CaseMetadata, ValidatedUrl
 
 PROCESS_RE = re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b")
@@ -76,6 +78,7 @@ def decode_html(content: bytes, content_type: str | None) -> str:
 
 
 def detect_special_page(html: str) -> None:
+    html = unescape(html)
     folded = fold_text(html)
     title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
     folded_title = fold_text(title_match.group(1)) if title_match else ""
@@ -149,16 +152,34 @@ def parse_case_page(
     content: bytes,
     content_type: str | None,
     source: ValidatedUrl,
+    *,
+    expected_cnj: str | None = None,
+    expected_id: str | None = None,
 ) -> CaseMetadata:
     html = decode_html(content, content_type)
     detect_special_page(html)
     soup = BeautifulSoup(html, "lxml")
     page_text = normalize_text(soup.get_text(" ", strip=True))
 
+    identities = []
+    for anchor in soup.find_all("a", href=True):
+        target = urlsplit(anchor["href"])
+        if target.path != "/projudi/listagens/DadosProcesso":
+            continue
+        text = normalize_text(anchor.get_text(" ", strip=True))
+        params = parse_qsl(target.query, keep_blank_values=True)
+        if PROCESS_RE.fullmatch(text) and len(params) == 1 and params[0][0] == "numeroProcesso":
+            identities.append((text, params[0][1]))
+    identity = identities[0] if identities else None
+    if expected_cnj is not None:
+        if identity is None or identity[0] != expected_cnj:
+            raise IdentityError("la ficha no identifica el CNJ solicitado en su encabezado")
+        if not identity[1].isdigit() or (expected_id and identity[1] != expected_id):
+            raise IdentityError("el identificador interno de la ficha no coincide")
     process_match = PROCESS_RE.search(page_text)
-    if not process_match:
+    if identity is None and not process_match:
         raise ParseError("no se encontro el numero CNJ")
-    process_number = process_match.group(0)
+    process_number = identity[0] if identity else process_match.group(0)
     digits, process_year = _validate_cnj_number(process_number)
 
     secrecy_value = _cell_after_label(soup, "Segredo de Justiça")
@@ -183,7 +204,7 @@ def parse_case_page(
     if secrecy is not False:
         return CaseMetadata(
             **partial_metadata,
-            projudi_internal_id=None,
+            projudi_internal_id=identity[1] if identity else None,
             distribution_at=None,
             subject=None,
             is_secret=secrecy,
@@ -195,12 +216,13 @@ def parse_case_page(
 
     subject = _cell_after_label(soup, "Assunto")
     internal_match = INTERNAL_ID_RE.search(html)
-    if not internal_match:
+    internal_id = identity[1] if identity else internal_match.group(1) if internal_match else None
+    if not internal_id:
         raise ParseError("no se encontro el identificador interno de descarga")
 
     return CaseMetadata(
         **partial_metadata,
-        projudi_internal_id=internal_match.group(1),
+        projudi_internal_id=internal_id,
         distribution_at=_parse_distribution_date(distribution_value),
         subject=subject,
         is_secret=False,

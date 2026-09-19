@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import random
 import re
 import sqlite3
 import time
-import uuid
+from collections import Counter
 from collections.abc import Callable
-from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -19,11 +19,15 @@ from urllib.parse import unquote, urlencode, urljoin
 import httpx
 
 from .config import ScraperConfig
+from .dataset import CASE_PATH, DOWNLOAD_PATH, DatasetRecord
 from .errors import (
     AccessChallengeError,
     FetchError,
+    IdentityError,
+    NotFoundError,
+    ParseError,
+    PauseError,
     PdfValidationError,
-    ScraperError,
     SessionExpiredError,
     StorageError,
 )
@@ -34,34 +38,25 @@ from .runtime import (
     Database,
     EventLogger,
     PersistentRateLimiter,
-    StorageLock,
     StoragePaths,
-    StoredCase,
     StoredCaseDocument,
     utc_now,
 )
-from .url_validation import TRUSTED_HOST, validate_input_url, validate_trusted_target
+from .url_validation import TRUSTED_HOST, validate_trusted_target
 
-DOWNLOAD_PATH = "/projudi/acoes/DownloadProcesso"
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 RETRYABLE_STATUSES = {408, 425, 429, 500, 502, 503, 504}
 BACKOFF_SECONDS = (5.0, 15.0)
 MAX_REDIRECTS = 3
 
 
-@dataclass(slots=True)
-class AttemptBudget:
-    page: int = 0
-    pdf: int = 0
-
-
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class PageResponse:
     content: bytes
     content_type: str | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class DownloadedPdf:
     temp_path: Path
     validation: PdfValidation
@@ -70,8 +65,7 @@ class DownloadedPdf:
 
 
 class _RetryableRequest(Exception):
-    def __init__(self, status_code: int | None, retry_after: float | None = None) -> None:
-        super().__init__(f"retryable status={status_code}")
+    def __init__(self, status_code: int, retry_after: float | None = None):
         self.status_code = status_code
         self.retry_after = retry_after
 
@@ -79,397 +73,298 @@ class _RetryableRequest(Exception):
 class ScraperService:
     def __init__(
         self,
-        config: ScraperConfig | None = None,
+        config: ScraperConfig,
         *,
-        sleep: Callable[[float], None] = time.sleep,
-        jitter: Callable[[float, float], float] = random.uniform,
-        now: Callable[[], datetime] = utc_now,
-    ) -> None:
-        self.config = (config or ScraperConfig.from_env()).normalized()
-        self.sleep = sleep
-        self.jitter = jitter
-        self.now = now
+        sleep: Callable = time.sleep,
+        jitter: Callable = random.uniform,
+        now: Callable = utc_now,
+    ):
+        self.config = config.normalized()
+        self.sleep, self.jitter, self.now = sleep, jitter, now
         self.paths = StoragePaths(self.config.storage_root)
         self.paths.initialize()
         self.logger = EventLogger(self.paths, self.config)
 
-    def scrape_url(self, url: str, refresh: bool = False) -> ScrapeResult:
-        run_id = str(uuid.uuid4())
-        started_at = self.now()
-        input_fingerprint = hashlib.sha256(url.encode("utf-8", errors="replace")).hexdigest()
-
-        with StorageLock(
-            self.paths.lock,
-            self.config.lock_timeout_seconds,
-            sleep=self.sleep,
-        ):
-            database = Database(self.paths.database)
-            run_started = False
-            try:
-                database.start_run(run_id, input_fingerprint, started_at)
-                run_started = True
-                self.logger.emit("run_started", run_id=run_id, refresh=refresh)
-                source = validate_input_url(url)
-                result = self._scrape_locked(database, source, run_id, refresh)
-                database.finish_run(
-                    run_id,
-                    result.status,
-                    finished_at=self.now(),
-                    bytes_received=result.size_bytes,
-                )
-                self.logger.emit(
-                    "run_finished",
-                    run_id=run_id,
-                    process_number=result.process_number,
-                    status=result.status,
-                    bytes=result.size_bytes,
-                    sha256=result.sha256,
-                )
-                return result
-            except ScraperError as exc:
-                exc.run_id = run_id
-                if isinstance(exc, AccessChallengeError):
-                    now_timestamp = time.time()
-                    database.activate_access_cooldown(
-                        now_timestamp,
-                        now_timestamp + self.config.challenge_cooldown_seconds,
-                    )
-                if run_started:
-                    self._finish_failed_run(database, run_id, exc)
-                self._safe_log(
-                    "run_failed",
-                    level="error",
-                    run_id=run_id,
-                    error_code=exc.code,
-                )
-                raise
-            except (OSError, sqlite3.Error) as exc:
-                wrapped = StorageError("fallo inesperado del almacenamiento", run_id=run_id)
-                if run_started:
-                    self._finish_failed_run(database, run_id, wrapped)
-                self._safe_log(
-                    "run_failed",
-                    level="error",
-                    run_id=run_id,
-                    error_code=wrapped.code,
-                    error_type=type(exc).__name__,
-                )
-                raise wrapped from exc
-            except Exception as exc:
-                wrapped = ScraperError("fallo interno inesperado", run_id=run_id)
-                if run_started:
-                    self._finish_failed_run(database, run_id, wrapped)
-                self._safe_log(
-                    "run_failed",
-                    level="error",
-                    run_id=run_id,
-                    error_code=wrapped.code,
-                    error_type=type(exc).__name__,
-                )
-                raise wrapped from exc
-            finally:
-                database.close()
-
-    def _scrape_locked(
+    def scrape_record(
         self,
+        record: DatasetRecord,
         database: Database,
-        source: ValidatedUrl,
+        case_id: str,
         run_id: str,
-        refresh: bool,
+        *,
+        refresh: bool = False,
     ) -> ScrapeResult:
-        removed = self.paths.cleanup_stale_temp(self.config.stale_temp_hours)
-        if removed:
-            self.logger.emit("stale_temp_cleaned", run_id=run_id, count=removed)
-
-        cached_case = database.find_case_by_url(source.canonical_url)
-        if cached_case is not None and not refresh:
-            if cached_case.is_secret is True:
-                database.attach_case(run_id, cached_case.case_id)
-                return self._result_from_cached_secret(cached_case, run_id)
-            if cached_case.is_secret is None:
-                database.attach_case(run_id, cached_case.case_id)
-                return self._result_from_cached_unknown(cached_case, run_id)
-
-        existing = database.find_latest_valid_by_url(source.canonical_url)
-        if existing is not None:
-            if self._existing_is_valid(database, existing, run_id):
-                if not refresh:
-                    database.attach_case(run_id, existing.case_id)
-                    return self._result_from_stored(existing, "already_exists", run_id)
-            else:
-                existing = None
-
-        blocked_until = database.get_access_blocked_until()
-        if blocked_until is not None and blocked_until > time.time():
-            blocked_at = datetime.fromtimestamp(blocked_until, timezone.utc).isoformat()
-            raise AccessChallengeError(
-                f"cooldown activo por un desafio anterior hasta {blocked_at}"
-            )
-
-        limiter = PersistentRateLimiter(
-            database,
-            self.config,
-            sleep=self.sleep,
-            jitter=self.jitter,
-        )
-        budget = AttemptBudget()
+        existing = database.find_latest_valid_by_case_id(case_id)
+        if (
+            existing
+            and existing.is_secret is False
+            and self._existing_is_valid(database, existing, run_id)
+            and not refresh
+        ):
+            return self._result_from_stored(existing, "already_exists", run_id)
+        blocked = database.get_access_blocked_until()
+        if blocked and blocked > time.time():
+            raise PauseError("access_cooldown", "cooldown de acceso activo", blocked)
+        limiter = PersistentRateLimiter(database, self.config, sleep=self.sleep, jitter=self.jitter)
+        budget: Counter = Counter()
         client = self._new_client()
+        recovered = False
+        fallback_used = False
+        need_context = True
+        source = ValidatedUrl(record.data["source_url"], None)
+        effective_id = record.data["projudi_internal_id"]
+        temp = self.paths.temp_file(run_id)
         try:
-            page = self._fetch_page(client, source.canonical_url, run_id, database, limiter, budget)
-            metadata = parse_case_page(page.content, page.content_type, source)
-            checked_at = self.now()
-            case_id = database.upsert_case(metadata, checked_at)
-            database.attach_case(run_id, case_id)
-            self.logger.emit(
-                "case_parsed",
-                run_id=run_id,
-                process_number=metadata.process_number,
-                is_secret=metadata.is_secret,
-            )
-
-            if metadata.is_secret is True:
-                return ScrapeResult(
-                    status="secret_skipped",
-                    process_number=metadata.process_number,
-                    distribution_at=None,
-                    retrieved_at=None,
-                    subject=None,
-                    is_secret=True,
-                    pdf_path=None,
-                    sha256=None,
-                    size_bytes=None,
-                    page_count=None,
-                    run_id=run_id,
-                )
-            if metadata.is_secret is None:
-                return ScrapeResult(
-                    status="secrecy_unknown",
-                    process_number=metadata.process_number,
-                    distribution_at=None,
-                    retrieved_at=None,
-                    subject=None,
-                    is_secret=None,
-                    pdf_path=None,
-                    sha256=None,
-                    size_bytes=None,
-                    page_count=None,
-                    run_id=run_id,
-                )
-
-            canonical_existing = database.find_latest_valid_by_case_id(case_id)
-            if (
-                canonical_existing is not None
-                and not refresh
-                and self._existing_is_valid(database, canonical_existing, run_id)
-            ):
-                return self._result_from_stored(
-                    canonical_existing,
-                    "already_exists",
-                    run_id,
-                )
-
-            if metadata.projudi_internal_id is None:
-                raise FetchError("falta el identificador interno necesario para descargar")
-
-            session_recovered = False
-            while budget.pdf < self.config.pdf_attempts:
-                budget.pdf += 1
-                database.increment_attempt(run_id, "pdf")
-                temp_path = self.paths.temp_file(run_id)
-                self.paths.remove_managed_file(temp_path)
+            while True:
                 try:
+                    if need_context:
+                        try:
+                            page = self._fetch_page(
+                                client,
+                                self.config.bootstrap_url,
+                                "bootstrap",
+                                run_id,
+                                database,
+                                limiter,
+                                budget,
+                            )
+                            if b"DadosProcesso?numeroProcesso=" not in page.content:
+                                raise SessionExpiredError(
+                                    "la inicializacion no devolvio una consulta publica"
+                                )
+                        except (FetchError, ParseError) as exc:
+                            raise PauseError(
+                                "bootstrap_failed", "fallo persistente de inicializacion"
+                            ) from exc
+                        try:
+                            page = self._fetch_page(
+                                client,
+                                source.canonical_url,
+                                "page",
+                                run_id,
+                                database,
+                                limiter,
+                                budget,
+                            )
+                            metadata = parse_case_page(
+                                page.content,
+                                page.content_type,
+                                source,
+                                expected_cnj=record.cnj,
+                                expected_id=effective_id,
+                            )
+                        except (NotFoundError, IdentityError):
+                            if fallback_used:
+                                raise
+                            fallback_used = True
+                            query_url = f"https://{TRUSTED_HOST}/projudi/buscas/ProcessosParte"
+                            page = self._fetch_page(
+                                client,
+                                query_url,
+                                "resolve",
+                                run_id,
+                                database,
+                                limiter,
+                                budget,
+                                data={"numeroProcesso": record.cnj},
+                            )
+                            metadata = parse_case_page(
+                                page.content,
+                                page.content_type,
+                                ValidatedUrl(query_url, None),
+                                expected_cnj=record.cnj,
+                            )
+                            if metadata.projudi_internal_id:
+                                metadata = replace(
+                                    metadata,
+                                    source_url=(
+                                        f"https://{TRUSTED_HOST}{CASE_PATH}?numeroProcesso={metadata.projudi_internal_id}"
+                                    ),
+                                )
+                                source = ValidatedUrl(metadata.source_url, None)
+                                effective_id = metadata.projudi_internal_id
+                        database.upsert_case(metadata, self.now())
+                        if metadata.is_secret is not False:
+                            return ScrapeResult(
+                                "secret_skipped" if metadata.is_secret else "secrecy_unknown",
+                                metadata.process_number,
+                                metadata.distribution_at,
+                                None,
+                                metadata.subject,
+                                metadata.is_secret,
+                                None,
+                                None,
+                                None,
+                                None,
+                                run_id,
+                            )
+                        need_context = False
+                    if budget["pdf"] >= self.config.pdf_attempts:
+                        raise FetchError("se agotaron los intentos de descargar el PDF")
+                    budget["pdf"] += 1
+                    database.increment_attempt(run_id, "pdf")
+                    self.paths.remove_managed_file(temp)
                     downloaded = self._download_once(
-                        client,
-                        metadata,
-                        temp_path,
-                        run_id,
-                        limiter,
-                        budget.pdf,
+                        client, metadata, temp, run_id, limiter, budget["pdf"]
                     )
                     break
-                except SessionExpiredError:
-                    self.paths.remove_managed_file(temp_path)
-                    if session_recovered or budget.pdf >= self.config.pdf_attempts:
-                        raise FetchError(
-                            "la sesion expiro repetidamente durante la descarga"
-                        ) from None
-                    session_recovered = True
-                    self.logger.emit("session_recovery", run_id=run_id, phase="pdf")
+                except SessionExpiredError as exc:
+                    if recovered or budget["pdf"] >= self.config.pdf_attempts:
+                        if need_context:
+                            raise PauseError(
+                                "bootstrap_failed", "no se pudo establecer una sesion util"
+                            ) from exc
+                        raise FetchError("la sesion expiro repetidamente") from exc
+                    recovered = True
+                    database.increment_attempt(run_id, "session")
+                    self.logger.emit("session_recovery", run_id=run_id)
                     client.close()
                     client = self._new_client()
-                    page = self._fetch_page(
-                        client,
-                        source.canonical_url,
-                        run_id,
-                        database,
-                        limiter,
-                        budget,
-                    )
-                    refreshed_metadata = parse_case_page(page.content, page.content_type, source)
-                    if (
-                        refreshed_metadata.process_number_digits != metadata.process_number_digits
-                        or refreshed_metadata.is_secret is not False
-                    ):
-                        raise FetchError(
-                            "el expediente cambio durante la recuperacion de sesion"
-                        ) from None
-                    metadata = refreshed_metadata
-                    if metadata.projudi_internal_id is None:
-                        raise FetchError(
-                            "falta el identificador interno tras recuperar la sesion"
-                        ) from None
+                    need_context = True
                 except _RetryableRequest as exc:
-                    self.paths.remove_managed_file(temp_path)
-                    if budget.pdf >= self.config.pdf_attempts:
-                        raise FetchError("se agotaron los intentos de descarga del PDF") from exc
-                    self._sleep_before_retry(exc, budget.pdf, run_id, "pdf")
+                    # Honor server-requested pauses even on the last allowed attempt.
+                    self._sleep_before_retry(exc, budget["pdf"], run_id, "pdf", database)
+                    if budget["pdf"] >= self.config.pdf_attempts:
+                        raise FetchError("se agotaron los intentos de descargar el PDF") from exc
                 except httpx.TransportError as exc:
-                    self.paths.remove_managed_file(temp_path)
-                    if budget.pdf >= self.config.pdf_attempts:
-                        raise FetchError("fallo de red al descargar el PDF") from exc
-                    self._sleep_before_retry(None, budget.pdf, run_id, "pdf")
-                except Exception:
-                    self.paths.remove_managed_file(temp_path)
-                    raise
-            else:
-                raise FetchError("no se pudo descargar el PDF")
-
+                    if budget["pdf"] >= self.config.pdf_attempts or recovered:
+                        raise FetchError("fallo de red durante la descarga") from exc
+                    self._sleep_before_retry(None, budget["pdf"], run_id, "pdf", database)
+                    recovered = True
+                    database.increment_attempt(run_id, "session")
+                    client.close()
+                    client = self._new_client()
+                    need_context = True
             duplicate = database.find_valid_by_hash(case_id, downloaded.validation.sha256)
-            if duplicate is not None and self._existing_is_valid(database, duplicate, run_id):
-                self.paths.remove_managed_file(downloaded.temp_path)
+            if duplicate and self._existing_is_valid(database, duplicate, run_id):
                 return self._result_from_stored(duplicate, "unchanged", run_id)
-
-            retrieved_at = self.now()
-            final_path, relative_path = self.paths.final_file(
-                metadata,
-                retrieved_at,
-                downloaded.validation.sha256,
+            retrieved = self.now()
+            final, relative = self.paths.final_file(
+                metadata, retrieved, downloaded.validation.sha256
             )
-            self.paths.publish(downloaded.temp_path, final_path)
+            database.connection.execute(
+                "UPDATE runs SET published_path=? WHERE run_id=?", (relative, run_id)
+            )
+            database.connection.commit()
+            self.paths.publish(temp, final)
             try:
                 database.insert_document(
                     case_id=case_id,
-                    retrieved_at=retrieved_at,
-                    relative_path=relative_path,
+                    retrieved_at=retrieved,
+                    relative_path=relative,
                     sha256=downloaded.validation.sha256,
                     size_bytes=downloaded.validation.size_bytes,
                     mime_type=downloaded.mime_type,
                     page_count=downloaded.validation.page_count,
                     original_filename=downloaded.original_filename,
                 )
-            except sqlite3.Error as exc:
-                self.paths.remove_managed_file(final_path)
-                raise StorageError("no se pudo catalogar el PDF publicado") from exc
-
+            except (sqlite3.Error, StorageError) as exc:
+                self.paths.remove_managed_file(final)
+                raise StorageError("no se pudo catalogar el PDF") from exc
             return ScrapeResult(
-                status="downloaded",
-                process_number=metadata.process_number,
-                distribution_at=metadata.distribution_at,
-                retrieved_at=retrieved_at,
-                subject=metadata.subject,
-                is_secret=False,
-                pdf_path=final_path,
-                sha256=downloaded.validation.sha256,
-                size_bytes=downloaded.validation.size_bytes,
-                page_count=downloaded.validation.page_count,
-                run_id=run_id,
+                "downloaded",
+                metadata.process_number,
+                metadata.distribution_at,
+                retrieved,
+                metadata.subject,
+                False,
+                final,
+                downloaded.validation.sha256,
+                downloaded.validation.size_bytes,
+                downloaded.validation.page_count,
+                run_id,
             )
         finally:
             client.close()
+            self.paths.remove_managed_file(temp)
 
-    def _fetch_page(
-        self,
-        client: httpx.Client,
-        url: str,
-        run_id: str,
-        database: Database,
-        limiter: PersistentRateLimiter,
-        budget: AttemptBudget,
-    ) -> PageResponse:
-        last_error: Exception | None = None
-        while budget.page < self.config.page_attempts:
-            budget.page += 1
-            database.increment_attempt(run_id, "page")
+    def _fetch_page(self, client, url, phase, run_id, database, limiter, budget, *, data=None):
+        limit = 1 if phase == "resolve" else self.config.page_attempts
+        while budget[phase] < limit:
+            budget[phase] += 1
+            database.increment_attempt(run_id, phase)
             try:
-                response = self._read_page_once(client, url, run_id, limiter, budget.page)
-                html = decode_html(response.content, response.content_type)
-                detect_special_page(html)
+                response = self._read_page_once(
+                    client, url, run_id, limiter, budget[phase], phase, data
+                )
+                detect_special_page(decode_html(response.content, response.content_type))
                 return response
-            except AccessChallengeError:
-                raise
-            except SessionExpiredError as exc:
-                last_error = exc
             except _RetryableRequest as exc:
-                last_error = exc
-                if budget.page < self.config.page_attempts:
-                    self._sleep_before_retry(exc, budget.page, run_id, "page")
-                    continue
-            except httpx.TransportError as exc:
-                last_error = exc
-                if budget.page < self.config.page_attempts:
-                    self._sleep_before_retry(None, budget.page, run_id, "page")
-                    continue
-            if budget.page < self.config.page_attempts:
-                self._sleep_before_retry(None, budget.page, run_id, "page")
-        raise FetchError("se agotaron los intentos de obtener la ficha") from last_error
+                self._sleep_before_retry(exc, budget[phase], run_id, phase, database)
+            except httpx.TransportError:
+                if budget[phase] < limit:
+                    self._sleep_before_retry(None, budget[phase], run_id, phase, database)
+        raise FetchError(f"se agotaron los intentos de la fase {phase}")
 
-    def _read_page_once(
-        self,
-        client: httpx.Client,
-        url: str,
-        run_id: str,
-        limiter: PersistentRateLimiter,
-        attempt: int,
-    ) -> PageResponse:
+    def _read_page_once(self, client, url, run_id, limiter, attempt, phase, data):
         current_url = url
+        method = "POST" if data is not None else "GET"
         for redirect_count in range(MAX_REDIRECTS + 1):
             waited = limiter.wait()
-            started = time.monotonic()
             with client.stream(
-                "GET",
+                method,
                 current_url,
+                data=data,
+                headers={"Referer": url},
                 timeout=self._timeout(self.config.page_timeout_seconds),
             ) as response:
-                duration_ms = int((time.monotonic() - started) * 1000)
-                self.logger.emit(
-                    "http_response",
-                    run_id=run_id,
-                    phase="page",
-                    attempt=attempt,
-                    status=response.status_code,
-                    duration_ms=duration_ms,
-                    courtesy_wait_ms=int(waited * 1000),
-                )
+                self._log_response(response, run_id, phase, attempt, waited)
                 if response.status_code in REDIRECT_STATUSES:
-                    if redirect_count >= MAX_REDIRECTS:
-                        raise FetchError("demasiadas redirecciones al obtener la ficha")
-                    location = response.headers.get("Location")
-                    if not location:
-                        raise FetchError("redireccion sin cabecera Location")
-                    current_url = validate_trusted_target(urljoin(current_url, location))
+                    if redirect_count >= MAX_REDIRECTS or not response.headers.get("Location"):
+                        raise FetchError("redireccion invalida al obtener la ficha")
+                    current_url = validate_trusted_target(
+                        urljoin(current_url, response.headers["Location"])
+                    )
+                    if response.status_code == 303 or (
+                        method == "POST" and response.status_code in (301, 302)
+                    ):
+                        method, data = "GET", None
                     continue
-                if response.status_code == 403:
-                    raise AccessChallengeError("PROJUDI rechazo el acceso con HTTP 403")
+                if response.status_code in (401, 403):
+                    raise AccessChallengeError("PROJUDI rechazo el acceso")
+                if response.status_code in (404, 410):
+                    raise NotFoundError("no se encontro la ficha")
                 if response.status_code in RETRYABLE_STATUSES:
+                    self._diagnostic(response)
                     raise _RetryableRequest(
                         response.status_code,
                         self._parse_retry_after(response.headers.get("Retry-After")),
                     )
                 if response.status_code != 200:
-                    raise FetchError(
-                        "respuesta HTTP inesperada al obtener la ficha: "
-                        f"{response.status_code}"
-                    )
+                    raise FetchError(f"respuesta HTTP inesperada: {response.status_code}")
                 announced = self._content_length(response.headers.get("Content-Length"))
-                if announced is not None and announced > self.config.max_html_bytes:
-                    raise FetchError("la ficha supera el limite de tamano configurado")
+                if announced and announced > self.config.max_html_bytes:
+                    raise FetchError("la ficha supera el limite de tamano")
                 content = bytearray()
                 for chunk in response.iter_bytes():
                     content.extend(chunk)
                     if len(content) > self.config.max_html_bytes:
-                        raise FetchError("la ficha supero el limite durante la lectura")
+                        raise FetchError("la ficha supera el limite de tamano")
                 return PageResponse(bytes(content), response.headers.get("Content-Type"))
-        raise FetchError("no se pudo resolver la ficha")
+        raise FetchError("no se pudo obtener la ficha")
+
+    @staticmethod
+    def _diagnostic(response):
+        content = bytearray()
+        for chunk in response.iter_bytes(chunk_size=65536):
+            content.extend(chunk)
+            if len(content) >= 1024 * 1024:
+                break
+        return bytes(content)
+
+    def _log_response(self, response, run_id, phase, attempt, waited):
+        # The port is diagnostic evidence, never a session token or a cookie value.
+        stream = response.extensions.get("network_stream")
+        socket = stream.get_extra_info("socket") if stream else None
+        self.logger.emit(
+            "http_response",
+            run_id=run_id,
+            phase=phase,
+            attempt=attempt,
+            status=response.status_code,
+            courtesy_wait_ms=int(waited * 1000),
+            local_port=socket.getsockname()[1] if socket else None,
+        )
 
     def _download_once(
         self,
@@ -482,28 +377,21 @@ class ScraperService:
     ) -> DownloadedPdf:
         query = urlencode({"numeroProcesso": metadata.projudi_internal_id})
         current_url = f"https://{TRUSTED_HOST}{DOWNLOAD_PATH}?{query}"
-        headers = {"Referer": metadata.source_url, "Accept": "application/pdf"}
+        headers = {
+            "Referer": metadata.source_url,
+            "Accept": "application/pdf",
+            "Accept-Encoding": "identity",
+        }
 
         for redirect_count in range(MAX_REDIRECTS + 1):
             waited = limiter.wait()
-            started = time.monotonic()
             with client.stream(
                 "GET",
                 current_url,
                 headers=headers,
                 timeout=self._timeout(self.config.pdf_timeout_seconds),
             ) as response:
-                duration_ms = int((time.monotonic() - started) * 1000)
-                self.logger.emit(
-                    "http_response",
-                    run_id=run_id,
-                    process_number=metadata.process_number,
-                    phase="pdf",
-                    attempt=attempt,
-                    status=response.status_code,
-                    duration_ms=duration_ms,
-                    courtesy_wait_ms=int(waited * 1000),
-                )
+                self._log_response(response, run_id, "pdf", attempt, waited)
                 if response.status_code in REDIRECT_STATUSES:
                     if redirect_count >= MAX_REDIRECTS:
                         raise FetchError("demasiadas redirecciones al descargar el PDF")
@@ -512,9 +400,10 @@ class ScraperService:
                         raise FetchError("redireccion de PDF sin Location")
                     current_url = validate_trusted_target(urljoin(current_url, location))
                     continue
-                if response.status_code == 403:
+                if response.status_code in (401, 403):
                     raise AccessChallengeError("PROJUDI rechazo la descarga con HTTP 403")
                 if response.status_code in RETRYABLE_STATUSES:
+                    self._diagnostic(response)
                     raise _RetryableRequest(
                         response.status_code,
                         self._parse_retry_after(response.headers.get("Retry-After")),
@@ -527,24 +416,26 @@ class ScraperService:
                 content_type_header = response.headers.get("Content-Type", "")
                 mime_type = content_type_header.split(";", 1)[0].strip().lower()
                 if mime_type != "application/pdf":
-                    diagnostic = bytearray()
-                    for chunk in response.iter_bytes():
-                        diagnostic.extend(chunk)
-                        if len(diagnostic) >= 1024 * 1024:
-                            break
-                    html = decode_html(bytes(diagnostic), content_type_header)
+                    html = decode_html(self._diagnostic(response), content_type_header)
                     detect_special_page(html)
                     raise PdfValidationError("la descarga no devolvio application/pdf")
 
                 announced = self._content_length(response.headers.get("Content-Length"))
                 if announced is not None and announced > self.config.max_pdf_bytes:
                     raise PdfValidationError("el PDF supera el limite de tamano configurado")
+                filename = self._original_filename(response.headers.get("Content-Disposition"))
+                if filename and filename != f"{metadata.process_number}.pdf":
+                    raise PdfValidationError("Content-Disposition no corresponde al CNJ solicitado")
                 ensure_disk_space(self.paths, self.config, announced)
 
                 digest = hashlib.sha256()
                 received = 0
                 with create_temp_file(temp_path) as file_handle:
                     for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                        if received == 0 and not chunk.startswith(b"%PDF-"):
+                            detect_special_page(decode_html(chunk[:65536], content_type_header))
+                            raise PdfValidationError("la respuesta no comienza con la firma PDF")
+                        ensure_disk_space(self.paths, self.config, None)
                         received += len(chunk)
                         if received > self.config.max_pdf_bytes:
                             raise PdfValidationError("el PDF supero el limite durante la descarga")
@@ -560,6 +451,7 @@ class ScraperService:
                     temp_path,
                     expected_size=received,
                     expected_sha256=digest.hexdigest(),
+                    expected_process_number=metadata.process_number,
                 )
                 self.logger.emit(
                     "pdf_validated",
@@ -591,6 +483,7 @@ class ScraperService:
                 path,
                 expected_size=existing.size_bytes,
                 expected_sha256=existing.sha256,
+                expected_process_number=existing.process_number,
             )
             if validation.page_count != existing.page_count:
                 raise PdfValidationError("el numero de paginas del PDF existente cambio")
@@ -613,6 +506,10 @@ class ScraperService:
                 "User-Agent": self.config.user_agent,
                 "Accept-Language": "pt-BR,pt;q=0.9",
             },
+            http2=False,
+            limits=httpx.Limits(
+                max_connections=1, max_keepalive_connections=1, keepalive_expiry=None
+            ),
             verify=True,
             follow_redirects=False,
         )
@@ -631,12 +528,22 @@ class ScraperService:
         attempts_used: int,
         run_id: str,
         phase: str,
+        database: Database,
     ) -> None:
         if error is not None and error.retry_after is not None:
-            delay = min(120.0, max(0.0, error.retry_after))
+            delay = max(0.0, error.retry_after)
+            retry_at = time.time() + delay
+            with database.connection:
+                database.connection.execute(
+                    "UPDATE access_state SET blocked_until=?,reason='retry_after' "
+                    "WHERE singleton=1",
+                    (retry_at,),
+                )
+            if delay > 60:
+                raise PauseError("retry_after", "el servidor solicita una pausa", retry_at)
         else:
             index = min(max(attempts_used - 1, 0), len(BACKOFF_SECONDS) - 1)
-            delay = BACKOFF_SECONDS[index]
+            delay = BACKOFF_SECONDS[index] + self.jitter(0, self.config.max_request_jitter_seconds)
         self.logger.emit(
             "http_retry",
             level="warning",
@@ -652,7 +559,8 @@ class ScraperService:
         if not value:
             return None
         try:
-            return max(0.0, float(value))
+            number = float(value)
+            return max(0.0, number) if math.isfinite(number) else None
         except ValueError:
             try:
                 target = parsedate_to_datetime(value)
@@ -710,58 +618,3 @@ class ScraperService:
             page_count=stored.page_count,
             run_id=run_id,
         )
-
-    @staticmethod
-    def _result_from_cached_secret(stored: StoredCase, run_id: str) -> ScrapeResult:
-        return ScrapeResult(
-            status="secret_skipped",
-            process_number=stored.process_number,
-            distribution_at=None,
-            retrieved_at=None,
-            subject=None,
-            is_secret=True,
-            pdf_path=None,
-            sha256=None,
-            size_bytes=None,
-            page_count=None,
-            run_id=run_id,
-        )
-
-    @staticmethod
-    def _result_from_cached_unknown(stored: StoredCase, run_id: str) -> ScrapeResult:
-        return ScrapeResult(
-            status="secrecy_unknown",
-            process_number=stored.process_number,
-            distribution_at=None,
-            retrieved_at=None,
-            subject=None,
-            is_secret=None,
-            pdf_path=None,
-            sha256=None,
-            size_bytes=None,
-            page_count=None,
-            run_id=run_id,
-        )
-
-    def _finish_failed_run(self, database: Database, run_id: str, error: ScraperError) -> None:
-        with suppress(Exception):
-            database.finish_run(
-                run_id,
-                "error",
-                finished_at=self.now(),
-                error_code=error.code,
-                error_message=error.message,
-            )
-
-    def _safe_log(self, event: str, **fields: object) -> None:
-        with suppress(Exception):
-            self.logger.emit(event, **fields)
-
-
-def scrape_url(
-    url: str,
-    refresh: bool = False,
-    *,
-    config: ScraperConfig | None = None,
-) -> ScrapeResult:
-    return ScraperService(config).scrape_url(url, refresh=refresh)

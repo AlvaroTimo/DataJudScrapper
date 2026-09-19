@@ -48,3 +48,20 @@ class StorageError(ScraperError):
 
 class BusyError(StorageError):
     code = "storage_busy"
+
+
+class IdentityError(ParseError):
+    code = "identity_mismatch"
+
+
+class NotFoundError(FetchError):
+    code = "case_not_found"
+
+
+class PauseError(ScraperError):
+    exit_code = 3
+
+    def __init__(self, code: str, message: str, retry_at: float | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retry_at = retry_at

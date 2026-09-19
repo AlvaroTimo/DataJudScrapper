@@ -6,11 +6,12 @@ import sys
 from dataclasses import fields
 from pathlib import Path
 
+from .batch import BatchService
 from .config import ScraperConfig
 from .errors import ScraperError
-from .scraper import ScraperService
 
 CONFIG_HELP = {
+    "bootstrap_url": "consulta publica utilizada para inicializar cada sesion",
     "storage_root": "raiz para PDF, logs y estado (relativa al directorio actual)",
     "user_agent": "identificacion HTTP del cliente",
     "connect_timeout_seconds": "timeout de conexion en segundos",
@@ -37,10 +38,33 @@ def build_parser() -> argparse.ArgumentParser:
         description="Descarga responsable de expedientes publicos PROJUDI/TJBA.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    scrape = subparsers.add_parser("scrape", help="procesar un unico enlace publico")
-    scrape.add_argument("url", help="URL AcessoPublico de PROJUDI/TJBA")
+    scrape = subparsers.add_parser("scrape-dataset", help="importar el dataset y ejecutar un lote")
+    scrape.add_argument("dataset", type=Path, help="dataset JSONL")
+    scrape.add_argument("--metadata", type=Path, required=True, help="metadata global JSON")
+    selection = scrape.add_mutually_exclusive_group()
+    selection.add_argument("--limit", type=int, default=15, help="maximo de registros (15)")
+    selection.add_argument("--all", action="store_true", help="procesar todo el dataset")
+    scrape.add_argument("--sample", choices=("diverse", "first"), default="diverse")
+    scrape.add_argument("--seed", type=int, default=20260908)
+    resume = subparsers.add_parser("resume", help="reanudar exactamente la seleccion de un lote")
+    resume.add_argument("batch_id")
+    resume.add_argument("--retry-failed", action="store_true", help="reintentar registros fallidos")
+    status = subparsers.add_parser("status", help="consultar el estado sin acceder al portal")
+    status.add_argument("batch_id")
+    for command in (scrape, resume, status):
+        _add_config_arguments(command)
+    for command in (scrape, resume):
+        command.add_argument(
+            "--refresh",
+            action="store_true",
+            help="verificar y descargar de nuevo aunque ya exista un PDF valido",
+        )
+    return parser
+
+
+def _add_config_arguments(parser: argparse.ArgumentParser) -> None:
     for item in fields(ScraperConfig):
-        scrape.add_argument(
+        parser.add_argument(
             f"--{item.name.replace('_', '-')}",
             type=Path if item.name == "storage_root" else type(item.default),
             default=None,
@@ -49,12 +73,15 @@ def build_parser() -> argparse.ArgumentParser:
                 f"(DATAJUD_{item.name.upper()}; predeterminado: {item.default})"
             ),
         )
-    scrape.add_argument(
-        "--refresh",
-        action="store_true",
-        help="descargar y comparar una nueva captura aunque ya exista una valida",
+
+
+def _progress(event: dict) -> None:
+    state = "iniciando" if event["event"] == "record_started" else event["status"]
+    print(
+        f"[{event['position']}/{event['total']}] {event['process_number']}: {state}",
+        file=sys.stderr,
+        flush=True,
     )
-    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,7 +91,22 @@ def main(argv: list[str] | None = None) -> int:
         config = ScraperConfig.from_env(
             **{item.name: getattr(args, item.name) for item in fields(ScraperConfig)}
         )
-        result = ScraperService(config).scrape_url(args.url, refresh=args.refresh)
+        service = BatchService(config, progress=_progress)
+        if args.command == "scrape-dataset":
+            result = service.start(
+                args.dataset,
+                args.metadata,
+                limit=None if args.all else args.limit,
+                sample=args.sample,
+                seed=args.seed,
+                refresh=args.refresh,
+            )
+        elif args.command == "resume":
+            result = service.resume(
+                args.batch_id, retry_failed=args.retry_failed, refresh=args.refresh
+            )
+        else:
+            result = service.status(args.batch_id)
     except ScraperError as exc:
         payload = {
             "status": "error",
@@ -86,9 +128,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR [invalid_configuration]: {exc}", file=sys.stderr)
         return 2
 
-    print(result.to_json())
-    print(
-        f"OK [{result.status}]: {result.process_number}",
-        file=sys.stderr,
-    )
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    print(f"Lote {result['batch_id']}: {result['status']}", file=sys.stderr)
+    if args.command != "status":
+        if result["status"] == "paused":
+            return 130 if result["stop_reason"] == "interrupted" else 3
+        if result["status"] == "completed_with_errors":
+            return 1
     return 0

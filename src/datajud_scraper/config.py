@@ -13,6 +13,7 @@ DEFAULT_USER_AGENT = "DataJudScraper/0.1 (responsible PROJUDI/TJBA client)"
 class ScraperConfig:
     storage_root: Path = DEFAULT_STORAGE_ROOT
     user_agent: str = DEFAULT_USER_AGENT
+    bootstrap_url: str = "https://projudi.tjba.jus.br/projudi/AcessoPublico?codigoHash=22f20646"
     connect_timeout_seconds: float = 10.0
     page_timeout_seconds: float = 30.0
     pdf_timeout_seconds: float = 300.0
@@ -65,6 +66,13 @@ class ScraperConfig:
         return cls(**values).normalized()
 
     def normalized(self) -> ScraperConfig:
+        from .errors import InvalidInputError
+        from .url_validation import validate_input_url
+
+        try:
+            validate_input_url(self.bootstrap_url)
+        except InvalidInputError as exc:
+            raise ValueError(f"bootstrap_url invalida: {exc}") from exc
         root = self.storage_root.expanduser().resolve(strict=False)
         if not self.user_agent.strip() or any(
             ord(char) < 32 or ord(char) > 126 for char in self.user_agent

@@ -24,7 +24,7 @@ def isoformat_utc(value: datetime | None) -> str | None:
 @dataclass(frozen=True, slots=True)
 class ValidatedUrl:
     canonical_url: str
-    codigo_hash: str
+    codigo_hash: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +33,7 @@ class CaseMetadata:
     process_number_digits: str
     process_year: int
     source_url: str
-    codigo_hash: str
+    codigo_hash: str | None
     projudi_internal_id: str | None
     distribution_at: datetime | None
     subject: str | None

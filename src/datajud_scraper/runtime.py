@@ -55,11 +55,12 @@ class StoragePaths:
         self.logs = self.root / "logs"
         self.state = self.root / "state"
         self.tmp = self.root / "tmp"
+        self.reports = self.root / "reports"
         self.database = self.state / "scraper.sqlite3"
         self.lock = self.state / "scraper.lock"
 
     def initialize(self) -> None:
-        for directory in (self.root, self.pdfs, self.logs, self.state, self.tmp):
+        for directory in (self.root, self.pdfs, self.logs, self.state, self.tmp, self.reports):
             try:
                 directory.mkdir(mode=0o750, parents=True, exist_ok=True)
                 directory.chmod(0o750)
@@ -234,7 +235,7 @@ class EventLogger:
 
 
 class Database:
-    SCHEMA_VERSION = "2"
+    SCHEMA_VERSION = "3"
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -291,40 +292,85 @@ class Database:
         cases_exists = self.connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cases'"
         ).fetchone()
-        if current_version == "1" or (current_version is None and cases_exists):
-            self._migrate_v1_to_v2()
-        elif current_version not in (None, self.SCHEMA_VERSION):
-            raise StorageError("la version del esquema SQLite no es compatible")
+        if current_version not in (None, self.SCHEMA_VERSION) or (
+            current_version is None and cases_exists
+        ):
+            raise StorageError(
+                "esquema antiguo: use un almacenamiento vacio; no se borra automaticamente"
+            )
 
-        self._create_schema_v2()
+        self._create_schema_v3()
         self.connection.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
             (self.SCHEMA_VERSION,),
         )
         self.connection.commit()
 
-    def _create_schema_v2(self) -> None:
+    def _create_schema_v3(self) -> None:
         self.connection.executescript(
             """
+            CREATE TABLE IF NOT EXISTS datasets (
+                dataset_id TEXT PRIMARY KEY,
+                input_path TEXT NOT NULL,
+                metadata_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                metadata_sha256 TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                record_count INTEGER NOT NULL,
+                imported_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS dataset_records (
+                record_id INTEGER PRIMARY KEY,
+                dataset_id TEXT NOT NULL REFERENCES datasets(dataset_id),
+                line_number INTEGER NOT NULL,
+                case_id TEXT NOT NULL REFERENCES cases(case_id),
+                raw_json TEXT NOT NULL,
+                UNIQUE(dataset_id, line_number),
+                UNIQUE(dataset_id, case_id)
+            );
+            CREATE TABLE IF NOT EXISTS batches (
+                batch_id TEXT PRIMARY KEY,
+                dataset_id TEXT NOT NULL REFERENCES datasets(dataset_id),
+                status TEXT NOT NULL,
+                sample TEXT NOT NULL,
+                seed INTEGER NOT NULL,
+                config_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                next_retry_at REAL,
+                stop_reason TEXT,
+                infrastructure_failures INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS batch_items (
+                batch_id TEXT NOT NULL REFERENCES batches(batch_id),
+                position INTEGER NOT NULL,
+                record_id INTEGER NOT NULL REFERENCES dataset_records(record_id),
+                status TEXT NOT NULL DEFAULT 'pending',
+                last_run_id TEXT,
+                result_json TEXT,
+                PRIMARY KEY(batch_id, position),
+                UNIQUE(batch_id, record_id)
+            );
+            CREATE INDEX IF NOT EXISTS batch_items_status ON batch_items(batch_id, status);
             CREATE TABLE IF NOT EXISTS cases (
                 case_id TEXT PRIMARY KEY,
                 process_number TEXT NOT NULL UNIQUE,
                 process_number_digits TEXT NOT NULL UNIQUE,
-                source_url TEXT NOT NULL,
-                codigo_hash TEXT NOT NULL,
+                source_url TEXT,
+                codigo_hash TEXT,
                 projudi_internal_id TEXT,
                 distribution_at TEXT,
                 subject TEXT,
                 is_secret INTEGER CHECK (is_secret IN (0, 1) OR is_secret IS NULL),
                 first_seen_at TEXT NOT NULL,
-                last_checked_at TEXT NOT NULL
+                last_checked_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS case_sources (
                 source_id TEXT PRIMARY KEY,
                 case_id TEXT NOT NULL REFERENCES cases(case_id) ON DELETE CASCADE,
                 source_url TEXT NOT NULL UNIQUE,
-                codigo_hash TEXT NOT NULL,
+                codigo_hash TEXT,
                 first_seen_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL,
                 UNIQUE (case_id, source_url)
@@ -353,6 +399,12 @@ class Database:
                 started_at TEXT NOT NULL,
                 finished_at TEXT,
                 status TEXT NOT NULL,
+                batch_id TEXT REFERENCES batches(batch_id),
+                position INTEGER,
+                published_path TEXT,
+                bootstrap_attempts INTEGER NOT NULL DEFAULT 0,
+                resolve_attempts INTEGER NOT NULL DEFAULT 0,
+                session_recoveries INTEGER NOT NULL DEFAULT 0,
                 page_attempts INTEGER NOT NULL DEFAULT 0,
                 pdf_attempts INTEGER NOT NULL DEFAULT 0,
                 bytes_received INTEGER,
@@ -374,91 +426,38 @@ class Database:
             );
             INSERT OR IGNORE INTO access_state(singleton, blocked_until, reason)
             VALUES (1, NULL, NULL);
+            CREATE INDEX IF NOT EXISTS runs_batch_position ON runs(batch_id, position);
             """
         )
 
-    def _migrate_v1_to_v2(self) -> None:
-        self.connection.commit()
-        self.connection.execute("PRAGMA foreign_keys = OFF")
-        try:
-            self.connection.execute("BEGIN IMMEDIATE")
-            self.connection.execute("DROP TABLE IF EXISTS cases_v2")
+    def start_run(
+        self,
+        run_id: str,
+        input_url_sha256: str,
+        started_at: datetime,
+        *,
+        batch_id: str | None = None,
+        position: int | None = None,
+        case_id: str | None = None,
+    ) -> None:
+        with self.connection:
             self.connection.execute(
-                """
-                CREATE TABLE cases_v2 (
-                    case_id TEXT PRIMARY KEY,
-                    process_number TEXT NOT NULL UNIQUE,
-                    process_number_digits TEXT NOT NULL UNIQUE,
-                    source_url TEXT NOT NULL,
-                    codigo_hash TEXT NOT NULL,
-                    projudi_internal_id TEXT,
-                    distribution_at TEXT,
-                    subject TEXT,
-                    is_secret INTEGER CHECK (is_secret IN (0, 1) OR is_secret IS NULL),
-                    first_seen_at TEXT NOT NULL,
-                    last_checked_at TEXT NOT NULL
+                """INSERT INTO runs(
+                    run_id,input_url_sha256,started_at,status,batch_id,position,case_id)
+                VALUES (?,?,?,'running',?,?,?)""",
+                (run_id, input_url_sha256, isoformat_utc(started_at), batch_id, position, case_id),
+            )
+            if batch_id:
+                self.connection.execute(
+                    "UPDATE batch_items SET status='running',last_run_id=? "
+                    "WHERE batch_id=? AND position=?",
+                    (run_id, batch_id, position),
                 )
-                """
-            )
-            self.connection.execute(
-                """
-                INSERT INTO cases_v2
-                SELECT case_id, process_number, process_number_digits, source_url, codigo_hash,
-                       projudi_internal_id, distribution_at, subject, is_secret,
-                       first_seen_at, last_checked_at
-                FROM cases
-                """
-            )
-            self.connection.execute("DROP TABLE cases")
-            self.connection.execute("ALTER TABLE cases_v2 RENAME TO cases")
-            self.connection.execute(
-                """
-                CREATE TABLE case_sources (
-                    source_id TEXT PRIMARY KEY,
-                    case_id TEXT NOT NULL REFERENCES cases(case_id) ON DELETE CASCADE,
-                    source_url TEXT NOT NULL UNIQUE,
-                    codigo_hash TEXT NOT NULL,
-                    first_seen_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    UNIQUE (case_id, source_url)
-                )
-                """
-            )
-            self.connection.execute(
-                """
-                INSERT INTO case_sources(
-                    source_id, case_id, source_url, codigo_hash, first_seen_at, last_seen_at
-                )
-                SELECT lower(hex(randomblob(16))), case_id, source_url, codigo_hash,
-                       first_seen_at, last_checked_at
-                FROM cases
-                """
-            )
-            self.connection.execute(
-                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', '2')"
-            )
-            violations = self.connection.execute("PRAGMA foreign_key_check").fetchall()
-            if violations:
-                raise StorageError("la migracion SQLite produjo referencias invalidas")
-            self.connection.commit()
-        except Exception:
-            self.connection.rollback()
-            raise
-        finally:
-            self.connection.execute("PRAGMA foreign_keys = ON")
-
-    def start_run(self, run_id: str, input_url_sha256: str, started_at: datetime) -> None:
-        self.connection.execute(
-            """
-            INSERT INTO runs(run_id, input_url_sha256, started_at, status)
-            VALUES (?, ?, ?, 'running')
-            """,
-            (run_id, input_url_sha256, isoformat_utc(started_at)),
-        )
-        self.connection.commit()
 
     def increment_attempt(self, run_id: str, kind: str) -> None:
-        column = "page_attempts" if kind == "page" else "pdf_attempts"
+        if kind not in ("bootstrap", "page", "resolve", "pdf", "session"):
+            raise ValueError("fase de peticion desconocida")
+        column = "session_recoveries" if kind == "session" else f"{kind}_attempts"
         self.connection.execute(
             f"UPDATE runs SET {column} = {column} + 1 WHERE run_id = ?",
             (run_id,),
@@ -519,8 +518,8 @@ class Database:
                     UPDATE cases
                     SET process_number = ?, source_url = ?, codigo_hash = ?,
                         projudi_internal_id = COALESCE(?, projudi_internal_id),
-                        distribution_at = COALESCE(?, distribution_at),
-                        subject = COALESCE(?, subject),
+                        distribution_at = ?,
+                        subject = ?,
                         is_secret = ?, last_checked_at = ?
                     WHERE case_id = ?
                     """,

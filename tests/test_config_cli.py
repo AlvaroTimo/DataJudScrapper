@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import respx
-from conftest import DOWNLOAD_URL, PUBLIC_URL, case_html
+from conftest import DOWNLOAD_URL, PUBLIC_URL, SOURCE_URL, case_html
 
 from datajud_scraper.cli import main
 from datajud_scraper.config import ScraperConfig
@@ -61,6 +61,7 @@ def test_environment_and_explicit_precedence(tmp_path, monkeypatch) -> None:
         ("CHALLENGE_COOLDOWN_SECONDS", "-1"),
         ("USER_AGENT", "test\r\nInjected: value"),
         ("STORAGE_ROOT", ""),
+        ("BOOTSTRAP_URL", "https://example.com/session"),
     ],
 )
 def test_invalid_configuration_fails_before_storage_or_network(
@@ -69,7 +70,7 @@ def test_invalid_configuration_fails_before_storage_or_network(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv(f"DATAJUD_{name}", value)
     with respx.mock(assert_all_called=False) as router:
-        assert main(["scrape", PUBLIC_URL]) == 2
+        assert main(["scrape-dataset", "missing.jsonl", "--metadata", "missing.json"]) == 2
         assert len(router.calls) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["error_code"] == "invalid_configuration"
@@ -85,7 +86,7 @@ def test_direct_config_rejects_fractional_attempts() -> None:
 
 @respx.mock
 def test_cli_download_uses_local_data_and_overrides_invalid_environment(
-    tmp_path, monkeypatch, valid_pdf, capsys
+    tmp_path, monkeypatch, valid_pdf, capsys, dataset_factory
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DATAJUD_MAX_PDF_BYTES", "invalid")
@@ -95,17 +96,26 @@ def test_cli_download_uses_local_data_and_overrides_invalid_environment(
     pdf_route = respx.get(DOWNLOAD_URL).respond(
         200, content=valid_pdf, headers={"Content-Type": "application/pdf"}
     )
+    respx.get(SOURCE_URL).respond(200, content=case_html())
+    dataset, metadata = dataset_factory()
     arguments = [
-        "scrape", PUBLIC_URL,
-        "--max-pdf-bytes", str(len(valid_pdf)),
-        "--min-request-interval-seconds", "0",
-        "--max-request-jitter-seconds", "0",
-        "--min-free-bytes", "0",
+        "scrape-dataset",
+        str(dataset),
+        "--metadata",
+        str(metadata),
+        "--max-pdf-bytes",
+        str(len(valid_pdf)),
+        "--min-request-interval-seconds",
+        "0",
+        "--max-request-jitter-seconds",
+        "0",
+        "--min-free-bytes",
+        "0",
     ]
     assert main(arguments) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result["status"] == "downloaded"
-    assert Path(result["pdf_path"]).is_relative_to(tmp_path / "data")
+    assert result["counts"] == {"downloaded": 1}
+    assert Path(result["report_path"]).is_relative_to(tmp_path / "data")
     assert main(arguments) == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "already_exists"
+    assert json.loads(capsys.readouterr().out)["counts"] == {"already_exists": 1}
     assert page_route.call_count == pdf_route.call_count == 1

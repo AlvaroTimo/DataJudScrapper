@@ -9,7 +9,7 @@ import pytest
 from pypdf import PdfWriter
 
 from datajud_scraper.config import ScraperConfig
-from datajud_scraper.errors import BusyError, PdfValidationError
+from datajud_scraper.errors import BusyError, PdfValidationError, StorageError
 from datajud_scraper.pdf_validation import validate_pdf
 from datajud_scraper.runtime import Database, EventLogger, StorageLock, StoragePaths
 
@@ -57,7 +57,7 @@ def test_encrypted_pdf_without_empty_password_is_rejected(tmp_path) -> None:
         validate_pdf(path)
 
 
-def test_v1_database_is_migrated_without_losing_case(tmp_path) -> None:
+def test_legacy_database_is_rejected_without_deleting_data(tmp_path) -> None:
     path = tmp_path / "scraper.sqlite3"
     connection = sqlite3.connect(path)
     connection.executescript(
@@ -106,21 +106,35 @@ def test_v1_database_is_migrated_without_losing_case(tmp_path) -> None:
     )
     connection.close()
 
-    database = Database(path)
+    with pytest.raises(StorageError, match="esquema antiguo"):
+        Database(path)
+    with sqlite3.connect(path) as database:
+        assert database.execute("SELECT COUNT(*) FROM cases").fetchone()[0] == 1
+        assert database.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
+        assert database.execute("SELECT value FROM schema_meta").fetchone()[0] == "1"
+
+
+def test_rate_limit_is_persisted_across_clients(tmp_path):
+    from datajud_scraper.runtime import PersistentRateLimiter
+
+    config = ScraperConfig(storage_root=tmp_path)
+    db = Database(tmp_path / "limiter.sqlite3")
+    clock = [100.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
     try:
-        assert database.connection.execute(
-            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-        ).fetchone()[0] == "2"
-        assert database.connection.execute("SELECT COUNT(*) FROM cases").fetchone()[0] == 1
-        assert database.connection.execute("SELECT COUNT(*) FROM case_sources").fetchone()[0] == 1
-        assert database.connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
-        assert database.connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        columns = {
-            row[1]: row for row in database.connection.execute("PRAGMA table_info(cases)")
-        }
-        assert columns["projudi_internal_id"][3] == 0
-        assert columns["distribution_at"][3] == 0
-        assert columns["subject"][3] == 0
-        assert columns["is_secret"][3] == 0
+        PersistentRateLimiter(
+            db, config, clock=lambda: clock[0], sleep=sleep, jitter=lambda low, high: 2
+        ).wait()
+        db.close()
+        db = Database(tmp_path / "limiter.sqlite3")
+        PersistentRateLimiter(
+            db, config, clock=lambda: clock[0], sleep=sleep, jitter=lambda low, high: 2
+        ).wait()
+        assert sleeps == [5.0]
     finally:
-        database.close()
+        db.close()
