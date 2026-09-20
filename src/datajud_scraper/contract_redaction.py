@@ -1,0 +1,233 @@
+"""Render approved contract regions and irreversibly replace approved sensitive pixels.
+
+Rectangles are normalized coordinates in the displayed page / cropped contract page.
+A new image-only PDF avoids carrying hidden source text, cropped-out content, attachment
+streams, forms, links, annotations, or incremental revisions into a released artifact.
+All mask decisions still require visual review; regex proposals are never approvals.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import math
+import os
+import re
+import uuid
+from pathlib import Path
+
+
+def pixel_box(rect: list[float], width: int, height: int) -> tuple[int, int, int, int]:
+    if (
+        len(rect) != 4
+        or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in rect)
+        or any(not math.isfinite(v) for v in rect)
+        or not (0 <= rect[0] < rect[2] <= 1 and 0 <= rect[1] < rect[3] <= 1)
+    ):
+        raise ValueError("rectangulo normalizado invalido")
+    return (
+        math.floor(rect[0] * width),
+        math.floor(rect[1] * height),
+        math.ceil(rect[2] * width),
+        math.ceil(rect[3] * height),
+    )
+
+
+def region_rotation(region: dict) -> int:
+    """Clockwise quarter turns applied after cropping, before mask coordinates."""
+    rotation = region.get("rotation", 0)
+    if type(rotation) is not int or rotation not in (0, 90, 180, 270):
+        raise ValueError("rotacion debe ser 0, 90, 180 o 270 grados enteros")
+    return rotation
+
+
+def render_contract_page(source, region: dict, *, dpi: int = 240):
+    import pymupdf
+    from PIL import Image
+
+    rotation = region_rotation(region)
+    page_number = region["page"]
+    if type(page_number) is not int or not 1 <= page_number <= source.page_count:
+        raise ValueError("pagina fuente fuera de rango")
+    page = source[page_number - 1]
+    pixmap = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False, annots=True)
+    image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+    box = pixel_box(region.get("rect", [0, 0, 1, 1]), image.width, image.height)
+    image = image.crop(box)
+    if rotation:
+        operation = {
+            90: Image.Transpose.ROTATE_270,
+            180: Image.Transpose.ROTATE_180,
+            270: Image.Transpose.ROTATE_90,
+        }[rotation]
+        image = image.transpose(operation)
+    return image
+
+
+def redact_pixels(image, masks: list[dict], *, decision_mode: str = "manual"):
+    from PIL import ImageDraw
+
+    if decision_mode not in ("manual", "automatic"):
+        raise ValueError("modo de decision invalido")
+    cleaned = image.copy()
+    draw = ImageDraw.Draw(cleaned)
+    applied = []
+    for mask in masks:
+        if not mask.get("category"):
+            raise ValueError("la mascara no tiene categoria")
+        if decision_mode == "manual" and mask.get("confirmed") is not True:
+            raise ValueError("la mascara no tiene categoria y confirmacion manual")
+        if decision_mode == "automatic" and mask.get("origin") != "automatic":
+            raise ValueError("la mascara no tiene procedencia automatica")
+        x0, y0, x1, y1 = pixel_box(mask["rect"], image.width, image.height)
+        draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=(255, 255, 255))
+        applied.append((x0, y0, x1, y1))
+    return cleaned, applied
+
+
+def write_cleaned_contract(
+    source_path: Path,
+    output_path: Path,
+    regions: list[dict],
+    masks_by_page: dict[int, list[dict]],
+    *,
+    dpi: int = 240,
+    decision_mode: str = "manual",
+) -> dict:
+    """Build a draft; caller must separately verify identity, reviews and release gates."""
+    import pymupdf
+
+    if not regions or not 150 <= dpi <= 600:
+        raise ValueError("se requieren paginas y resolucion entre 150 y 600 DPI")
+    if set(masks_by_page) - set(range(1, len(regions) + 1)):
+        raise ValueError("hay mascaras para paginas que no existen")
+    if source_path.resolve() == output_path.resolve():
+        raise ValueError("el PDF original no se puede sobrescribir")
+    if output_path.exists():
+        raise ValueError("el PDF de salida ya existe; cree una nueva revision")
+    output_path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    temporary = output_path.with_name(f".{output_path.name}.{uuid.uuid4()}.part")
+    evidence = []
+    try:
+        with pymupdf.open(source_path) as source, pymupdf.open() as result:
+            for number, region in enumerate(regions, 1):
+                original = render_contract_page(source, region, dpi=dpi)
+                cleaned, boxes = redact_pixels(
+                    original, masks_by_page.get(number, []), decision_mode=decision_mode
+                )
+                buffer = io.BytesIO()
+                cleaned.save(buffer, format="PNG")
+                page = result.new_page(
+                    width=cleaned.width * 72 / dpi, height=cleaned.height * 72 / dpi
+                )
+                page.insert_image(page.rect, stream=buffer.getvalue())
+                evidence.append(
+                    {
+                        "page_number": number,
+                        "source_page": region["page"],
+                        "source_region": region.get("rect", [0, 0, 1, 1]),
+                        "source_rotation": region_rotation(region),
+                        "width_pixels": original.width,
+                        "height_pixels": original.height,
+                        "original_pixels_sha256": hashlib.sha256(original.tobytes()).hexdigest(),
+                        "cleaned_pixels_sha256": hashlib.sha256(cleaned.tobytes()).hexdigest(),
+                        "mask_pixel_boxes": boxes,
+                        "masks_sha256": hashlib.sha256(
+                            json.dumps(
+                                masks_by_page.get(number, []), sort_keys=True, separators=(",", ":")
+                            ).encode()
+                        ).hexdigest(),
+                    }
+                )
+            result.set_metadata({})
+            result.save(temporary, garbage=4, deflate=True)
+        temporary.chmod(0o640)
+        with pymupdf.open(temporary) as reopened:
+            if reopened.page_count != len(regions) or reopened.embfile_count():
+                raise ValueError("salida con paginas o adjuntos inesperados")
+            for page in reopened:
+                if page.get_text().strip() or page.get_links() or list(page.annots() or []):
+                    raise ValueError("la salida contiene capas de texto o anotaciones inesperadas")
+                if list(page.widgets() or []):
+                    raise ValueError("la salida conserva campos de formulario")
+                images = page.get_images()
+                if len(images) != 1:
+                    raise ValueError("la pagina limpia debe contener una sola imagen")
+                pixels = pymupdf.Pixmap(reopened, images[0][0])
+                if (
+                    hashlib.sha256(pixels.samples).hexdigest()
+                    != evidence[page.number]["cleaned_pixels_sha256"]
+                ):
+                    raise ValueError("la imagen guardada no coincide con los pixeles aprobados")
+            if reopened.get_xml_metadata() or any(
+                reopened.metadata.get(k)
+                for k in (
+                    "title",
+                    "author",
+                    "subject",
+                    "keywords",
+                    "creator",
+                    "producer",
+                    "creationDate",
+                    "modDate",
+                )
+            ):
+                raise ValueError("la salida conserva metadatos")
+        with temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
+        # Refuse overwriting an output created concurrently.
+        os.link(temporary, output_path)
+        temporary.unlink()
+        return {
+            "path": str(output_path.resolve()),
+            "sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+            "page_count": len(regions),
+            "dpi": dpi,
+            "pages": evidence,
+            "manual_review_status": "pending",
+            "decision_mode": decision_mode,
+        }
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+IDENTIFIER_PATTERNS = {
+    "cpf": re.compile(r"(?<!\d)\d{3}[.\s]?\d{3}[.\s]?\d{3}[-\s]?\d{2}(?!\d)"),
+    "email": re.compile(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}"),
+    "phone": re.compile(r"(?<!\d)(?:\+?55\s*)?\(?\d{2}\)?\s*9?\d{4}[-\s]\d{4}(?!\d)"),
+    "process_number": re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b"),
+}
+
+
+def identifier_proposals(words: list, width: float, height: float) -> list[dict]:
+    """High-recall unconfirmed boxes; excludes literal PII from the returned metadata."""
+    text_parts, offsets = [], []
+    cursor = 0
+    for word in words:
+        value = word[4]
+        text_parts.append(value)
+        offsets.append((cursor, cursor + len(value), word))
+        cursor += len(value) + 1
+    text = " ".join(text_parts)
+    proposals = []
+    for category, pattern in IDENTIFIER_PATTERNS.items():
+        for match in pattern.finditer(text):
+            matched = [
+                word for start, end, word in offsets if end > match.start() and start < match.end()
+            ]
+            if not matched:
+                continue
+            proposals.append(
+                {
+                    "category": category,
+                    "confirmed": False,
+                    "rect": [
+                        max(0, min(w[0] for w in matched) / width),
+                        max(0, min(w[1] for w in matched) / height),
+                        min(1, max(w[2] for w in matched) / width),
+                        min(1, max(w[3] for w in matched) / height),
+                    ],
+                }
+            )
+    return proposals

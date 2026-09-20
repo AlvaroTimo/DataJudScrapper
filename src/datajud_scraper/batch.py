@@ -46,8 +46,8 @@ class BatchService:
     ) -> dict:
         if limit is not None and (type(limit) is not int or limit < 1):
             raise InvalidInputError("limit debe ser un entero positivo")
-        if sample not in ("first", "diverse"):
-            raise InvalidInputError("sample debe ser first o diverse")
+        if sample not in ("first", "diverse", "stratified"):
+            raise InvalidInputError("sample debe ser first, diverse o stratified")
         loaded = load_dataset(path, metadata)  # Entire input is validated before creating storage.
         chosen = select_records(loaded.records, limit, sample, seed)
         self.paths.initialize()
@@ -80,6 +80,17 @@ class BatchService:
                             (batch_id, position, loaded.dataset_id, record.line_number),
                         )
                 self._export(db, batch_id)
+                if sample == "stratified":
+                    from .sampling import sampling_report
+
+                    self._write(
+                        self.paths.reports / batch_id / "sampling.json",
+                        json.dumps(
+                            sampling_report(loaded.records, chosen),
+                            ensure_ascii=False,
+                            indent=2,
+                        ) + "\n",
+                    )
                 return self._run(db, batch_id, refresh=refresh)
             finally:
                 db.close()
@@ -273,7 +284,7 @@ class BatchService:
                         result["status"],
                         finished_at=utc_now(),
                         bytes_received=result["size_bytes"]
-                        if result["status"] != "already_exists"
+                        if result["status"] not in ("already_exists", "contracts_preserved")
                         else 0,
                     )
                 except (PauseError, AccessChallengeError, StorageError) as exc:

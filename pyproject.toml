@@ -21,12 +21,23 @@ dev = [
     "respx>=0.22,<1",
     "ruff>=0.9",
 ]
+contracts = [
+    "pillow>=12,<13",
+    "pymupdf>=1.28.2,<2",
+    "rapidocr==3.9.2",
+    "onnxruntime>=1.20,<2",
+]
 
 [project.scripts]
 datajud-scraper = "datajud_scraper.cli:main"
+datajud-card-contracts = "datajud_scraper.card_automation:main"
+datajud-card-validation = "datajud_scraper.card_validation:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+datajud_scraper = ["ocr_models.json"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

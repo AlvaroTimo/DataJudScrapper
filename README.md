@@ -1,5 +1,12 @@
 # DataJud Scraper
 
+La automatización de extracción y anonimización se limita a **documentos contractuales
+de tarjetas de crédito**. Se estudian los 1.000 expedientes descargados y la validación
+manual queda limitada a 100 expedientes independientes. Consulte el
+[alcance vigente](docs/card-automation-plan.md) y la
+[ejecución automática](docs/card-automation.md). La validación está en curso: las salidas
+automáticas y las revisiones manuales se registran por separado.
+
 Importa el dataset JSONL de PROJUDI/TJBA y descarga sus PDF consolidados mediante lotes
 reanudables. Conserva todos los registros y la metadata original, incluidos campos extra.
 La entrada principal es `url_download` de tipo `DownloadProcesso`; esta versión no descarga

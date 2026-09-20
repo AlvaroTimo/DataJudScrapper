@@ -236,6 +236,7 @@ class EventLogger:
 
 class Database:
     SCHEMA_VERSION = "3"
+    BUSY_TIMEOUT_SECONDS = 30
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -243,11 +244,11 @@ class Database:
             descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o640)
             os.close(descriptor)
             path.chmod(0o640)
-            self.connection = sqlite3.connect(path, timeout=5.0)
+            self.connection = sqlite3.connect(path, timeout=self.BUSY_TIMEOUT_SECONDS)
             self.connection.row_factory = sqlite3.Row
             self.connection.execute("PRAGMA foreign_keys = ON")
             self.connection.execute("PRAGMA journal_mode = WAL")
-            self.connection.execute("PRAGMA busy_timeout = 5000")
+            self.connection.execute(f"PRAGMA busy_timeout = {self.BUSY_TIMEOUT_SECONDS * 1000}")
             self._initialize_schema()
             self._secure_sqlite_files()
         except (OSError, sqlite3.Error) as exc:
@@ -698,6 +699,13 @@ class Database:
             "SELECT document_id FROM documents WHERE case_id = ? AND sha256 = ?",
             (case_id, sha256),
         ).fetchone()
+        if self.connection.execute(
+            "SELECT 1 FROM schema_meta WHERE key='contracts_schema_version'"
+        ).fetchone():
+            from .contract_catalog import refresh_case_contract_state
+
+            with self.connection:
+                refresh_case_contract_state(self.connection, case_id)
         return row["document_id"]
 
     def mark_document_invalid(self, document_id: str, error_code: str) -> None:
@@ -723,6 +731,17 @@ class Database:
             (timestamp,),
         )
         self.connection.commit()
+
+    def mark_request_started(self, clock: Callable[[], float]) -> None:
+        # Take the timestamp after any competing catalog writer has finished.
+        # Otherwise database contention could consume the courtesy interval
+        # before the HTTP request even starts.
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.set_last_request_at(clock())
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def get_access_blocked_until(self) -> float | None:
         row = self.connection.execute(
@@ -800,6 +819,5 @@ class PersistentRateLimiter:
             )
         if wait_seconds:
             self.sleep(wait_seconds)
-        started = self.clock()
-        self.database.set_last_request_at(started)
+        self.database.mark_request_started(self.clock)
         return wait_seconds
