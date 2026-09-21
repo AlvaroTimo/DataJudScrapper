@@ -15,7 +15,7 @@ from functools import lru_cache
 from importlib.metadata import version
 from pathlib import Path
 
-from .ocr_models import MODEL_ROOT
+from ..ocr_models import MODEL_ROOT
 
 NEURAL_ROOT = Path.home() / ".local/share/datajud-scraper/rapidocr"
 NEURAL_MODELS = {
@@ -128,7 +128,7 @@ def neural_engine():
         path = NEURAL_ROOT / Path(relative).name
         if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise RuntimeError(
-                "OCR neuronal no preparado: ejecutar python -m datajud_scraper.card_ocr"
+                "OCR neuronal no preparado: ejecutar python -m datajud_scraper.adhesion.ocr"
             )
         # Explicit verified paths prevent the library from fetching weights at runtime.
         params[f"{task}.model_path"] = str(path)
@@ -184,17 +184,33 @@ def neural_words(image):
     return words
 
 
-def sparse_words(image, *, quality="best", segmentation=11):
+def table_engine():
     local = Path.home() / ".local/opt/datajud-tesseract"
     binary = shutil.which("tesseract") or str(local / "usr/bin/tesseract")
     if not Path(binary).is_file():
         raise RuntimeError("OCR de tablas no instalado: ejecutar scripts/setup_table_ocr.py")
-    if quality not in ("fast", "best") or segmentation not in (3, 6, 11):
-        raise ValueError("configuracion OCR invalida")
     env = dict(os.environ)
     env["OMP_THREAD_LIMIT"] = "1"
     if Path(binary).is_relative_to(local):
         env["LD_LIBRARY_PATH"] = str(local / "usr/lib/x86_64-linux-gnu")
+    return binary, env
+
+
+def table_configuration():
+    binary, env = table_engine()
+    version = subprocess.run(
+        [binary, "--version"], env=env, capture_output=True, text=True, check=True
+    ).stdout.splitlines()[0]
+    return {
+        "version": version,
+        "binary_sha256": hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
+    }
+
+
+def sparse_words(image, *, quality="best", segmentation=11):
+    binary, env = table_engine()
+    if quality not in ("fast", "best") or segmentation not in (3, 6, 11):
+        raise ValueError("configuracion OCR invalida")
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     result = subprocess.run(

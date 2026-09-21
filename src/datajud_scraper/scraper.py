@@ -511,57 +511,26 @@ class ScraperService:
     def _preserved_contracts(
         self, database: Database, stored: StoredCaseDocument, run_id: str
     ) -> ScrapeResult | None:
-        # The base scraper remains usable without the optional contracts extension.
-        version = database.connection.execute(
-            "SELECT value FROM schema_meta WHERE key='contracts_schema_version'"
-        ).fetchone()
-        if version is None:
-            return None
-        row = database.connection.execute(
-            "SELECT source_disposition FROM documents WHERE document_id=?", (stored.document_id,)
-        ).fetchone()
-        if row["source_disposition"] == "retained":
-            return None
-        from .contract_release import managed_path, verified_release
+        from .adhesion.archive import archived_release
 
-        try:
-            has_card_retention = database.connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='card_retention_events'"
-            ).fetchone()
-            card_retention = has_card_retention and database.connection.execute(
-                "SELECT 1 FROM card_retention_events WHERE document_id=?", (stored.document_id,)
-            ).fetchone()
-            if card_retention:
-                from .card_retention import verified_card_release
-
-                manifest = verified_card_release(
-                    database.connection, self.paths.root, stored.document_id
-                )
-            else:
-                manifest = verified_release(
-                    database.connection, self.paths.root, stored.document_id
-                )
-        except (ValueError, OSError, sqlite3.Error) as exc:
-            raise StorageError(
-                "la conservacion de contratos requiere reparar o completar su publicacion"
-            ) from exc
-        return ScrapeResult(
-            status="contracts_preserved",
-            process_number=stored.process_number,
-            distribution_at=stored.distribution_at,
-            retrieved_at=stored.retrieved_at,
-            subject=stored.subject,
-            is_secret=stored.is_secret,
-            pdf_path=None,
-            sha256=None,
-            size_bytes=None,
-            page_count=None,
-            run_id=run_id,
-            contract_count=len(manifest["contracts"]),
-            contract_paths=tuple(
-                managed_path(self.paths.root, c["path"]) for c in manifest["contracts"]
-            ),
-        )
+        archived = archived_release(self.paths.root, stored.document_id)
+        if archived is not None:
+            return ScrapeResult(
+                status="contracts_preserved",
+                process_number=stored.process_number,
+                distribution_at=stored.distribution_at,
+                retrieved_at=stored.retrieved_at,
+                subject=stored.subject,
+                is_secret=stored.is_secret,
+                pdf_path=None,
+                sha256=None,
+                size_bytes=None,
+                page_count=None,
+                run_id=run_id,
+                contract_count=len(archived),
+                contract_paths=tuple(archived),
+            )
+        return None
 
     def _new_client(self) -> httpx.Client:
         return httpx.Client(

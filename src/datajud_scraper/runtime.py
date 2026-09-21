@@ -699,13 +699,6 @@ class Database:
             "SELECT document_id FROM documents WHERE case_id = ? AND sha256 = ?",
             (case_id, sha256),
         ).fetchone()
-        if self.connection.execute(
-            "SELECT 1 FROM schema_meta WHERE key='contracts_schema_version'"
-        ).fetchone():
-            from .contract_catalog import refresh_case_contract_state
-
-            with self.connection:
-                refresh_case_contract_state(self.connection, case_id)
         return row["document_id"]
 
     def mark_document_invalid(self, document_id: str, error_code: str) -> None:

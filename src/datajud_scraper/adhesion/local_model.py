@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import httpx
 
 DEFAULT_MODEL = "qwen3.5:27b"
+REFERENCE_MODEL = "qwen3-vl:8b-instruct-q8_0"
 PROMPT_VERSION = "card-2026-09-20-v2"
 
 

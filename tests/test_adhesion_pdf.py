@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-from datajud_scraper.contract_redaction import (
+from datajud_scraper.adhesion.pdf import (
     identifier_proposals,
     pixel_box,
     redact_pixels,

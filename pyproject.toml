@@ -30,8 +30,7 @@ contracts = [
 
 [project.scripts]
 datajud-scraper = "datajud_scraper.cli:main"
-datajud-card-contracts = "datajud_scraper.card_automation:main"
-datajud-card-validation = "datajud_scraper.card_validation:main"
+datajud-adhesion = "datajud_scraper.adhesion.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
