@@ -44,7 +44,9 @@ def build_parser() -> argparse.ArgumentParser:
     selection = scrape.add_mutually_exclusive_group()
     selection.add_argument("--limit", type=int, default=15, help="maximo de registros (15)")
     selection.add_argument("--all", action="store_true", help="procesar todo el dataset")
-    scrape.add_argument("--sample", choices=("diverse", "first"), default="diverse")
+    scrape.add_argument(
+        "--sample", choices=("diverse", "first", "stratified"), default="diverse"
+    )
     scrape.add_argument("--seed", type=int, default=20260908)
     resume = subparsers.add_parser("resume", help="reanudar exactamente la seleccion de un lote")
     resume.add_argument("batch_id")

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from io import BytesIO
 
@@ -136,5 +139,30 @@ def test_rate_limit_is_persisted_across_clients(tmp_path):
             db, config, clock=lambda: clock[0], sleep=sleep, jitter=lambda low, high: 2
         ).wait()
         assert sleeps == [5.0]
+    finally:
+        db.close()
+
+
+def test_catalog_contention_does_not_abort_or_backdate_request_start(tmp_path):
+    from datajud_scraper.runtime import PersistentRateLimiter
+
+    path = tmp_path / "concurrent.sqlite3"
+    db = Database(path)
+    locked = threading.Event()
+
+    def catalog_writer():
+        with sqlite3.connect(path) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            locked.set()
+            # Exceeds the old five-second downloader timeout.
+            time.sleep(5.2)
+            return time.time()
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            writer = executor.submit(catalog_writer)
+            assert locked.wait(timeout=2)
+            PersistentRateLimiter(db, ScraperConfig(storage_root=tmp_path)).wait()
+            assert db.get_last_request_at() >= writer.result()
     finally:
         db.close()

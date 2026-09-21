@@ -95,11 +95,14 @@ class ScraperService:
         refresh: bool = False,
     ) -> ScrapeResult:
         existing = database.find_latest_valid_by_case_id(case_id)
+        preserved = self._preserved_contracts(database, existing, run_id) if existing else None
+        if preserved and not refresh:
+            return preserved
         if (
             existing
             and existing.is_secret is False
-            and self._existing_is_valid(database, existing, run_id)
             and not refresh
+            and self._existing_is_valid(database, existing, run_id)
         ):
             return self._result_from_stored(existing, "already_exists", run_id)
         blocked = database.get_access_blocked_until()
@@ -236,6 +239,11 @@ class ScraperService:
                     client = self._new_client()
                     need_context = True
             duplicate = database.find_valid_by_hash(case_id, downloaded.validation.sha256)
+            preserved = (
+                self._preserved_contracts(database, duplicate, run_id) if duplicate else None
+            )
+            if preserved:
+                return preserved
             if duplicate and self._existing_is_valid(database, duplicate, run_id):
                 return self._result_from_stored(duplicate, "unchanged", run_id)
             retrieved = self.now()
@@ -499,6 +507,30 @@ class ScraperService:
                 error_code=exc.code,
             )
             return False
+
+    def _preserved_contracts(
+        self, database: Database, stored: StoredCaseDocument, run_id: str
+    ) -> ScrapeResult | None:
+        from .adhesion.archive import archived_release
+
+        archived = archived_release(self.paths.root, stored.document_id)
+        if archived is not None:
+            return ScrapeResult(
+                status="contracts_preserved",
+                process_number=stored.process_number,
+                distribution_at=stored.distribution_at,
+                retrieved_at=stored.retrieved_at,
+                subject=stored.subject,
+                is_secret=stored.is_secret,
+                pdf_path=None,
+                sha256=None,
+                size_bytes=None,
+                page_count=None,
+                run_id=run_id,
+                contract_count=len(archived),
+                contract_paths=tuple(archived),
+            )
+        return None
 
     def _new_client(self) -> httpx.Client:
         return httpx.Client(

@@ -10,6 +10,7 @@ SuccessStatus = Literal[
     "downloaded",
     "already_exists",
     "unchanged",
+    "contracts_preserved",
     "secret_skipped",
     "secrecy_unknown",
 ]
@@ -60,9 +61,11 @@ class ScrapeResult:
     size_bytes: int | None
     page_count: int | None
     run_id: str
+    contract_count: int | None = None
+    contract_paths: tuple[Path, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result = {
             "status": self.status,
             "process_number": self.process_number,
             "distribution_at": isoformat_utc(self.distribution_at),
@@ -75,6 +78,10 @@ class ScrapeResult:
             "page_count": self.page_count,
             "run_id": self.run_id,
         }
+        if self.contract_count is not None:
+            result["contract_count"] = self.contract_count
+            result["contract_paths"] = [str(path) for path in self.contract_paths]
+        return result
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)

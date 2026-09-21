@@ -1,0 +1,34 @@
+[
+  {
+    "quality": "best",
+    "language": "por",
+    "repository_revision": "e12c65a915945e4c28e237a9b52bc4a8f39a0cec",
+    "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/por.traineddata",
+    "sha256": "711de9dbb8052067bd42f16b9119967f30bada80d57e2ef24f65d09f531adb04",
+    "size_bytes": 8159939
+  },
+  {
+    "quality": "best",
+    "language": "eng",
+    "repository_revision": "e12c65a915945e4c28e237a9b52bc4a8f39a0cec",
+    "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/eng.traineddata",
+    "sha256": "8280aed0782fe27257a68ea10fe7ef324ca0f8d85bd2fd145d1c2b560bcb66ba",
+    "size_bytes": 15400601
+  },
+  {
+    "quality": "fast",
+    "language": "por",
+    "repository_revision": "87416418657359cb625c412a48b6e1d6d41c29bd",
+    "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/87416418657359cb625c412a48b6e1d6d41c29bd/por.traineddata",
+    "sha256": "c4932b937207a9514b7514d518b931a99938c02a28a5a5a553f8599ed58b7deb",
+    "size_bytes": 1982756
+  },
+  {
+    "quality": "fast",
+    "language": "eng",
+    "repository_revision": "87416418657359cb625c412a48b6e1d6d41c29bd",
+    "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/87416418657359cb625c412a48b6e1d6d41c29bd/eng.traineddata",
+    "sha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+    "size_bytes": 4113088
+  }
+]

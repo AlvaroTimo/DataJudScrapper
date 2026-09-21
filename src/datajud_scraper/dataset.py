@@ -199,6 +199,10 @@ def select_records(
 ) -> list[DatasetRecord]:
     if limit is None or sample == "first":
         return records[:] if limit is None else records[:limit]
+    if sample == "stratified":
+        from .sampling import stratified_records
+
+        return stratified_records(records, limit, seed)
     chosen: list[DatasetRecord] = []
     seen, courts, classes = set(), set(), set()
 

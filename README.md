@@ -1,5 +1,15 @@
 # DataJud Scraper
 
+La extracción se limita a **termos y documentos equivalentes de adhesión a tarjetas**,
+completos y separados del expediente. El nuevo flujo detecta instrumentos, aplica máscaras
+y comprueba limpieza y conservación. Tiene estado independiente, backup verificable,
+30 casos de desarrollo y una muestra aleatoria reservada de 25 procesos.
+Consulte la [metodología, comandos y evaluación](docs/adhesion.md).
+Los controles automáticos y la revisión visual asistida por IA se registran por separado.
+
+**El primer piloto no alcanzó el 80 % requerido.** La ejecución completa del lote quedó
+deshabilitada. Consulte los [resultados y limitaciones](docs/adhesion-pilot-20260920.md).
+
 Importa el dataset JSONL de PROJUDI/TJBA y descarga sus PDF consolidados mediante lotes
 reanudables. Conserva todos los registros y la metadata original, incluidos campos extra.
 La entrada principal es `url_download` de tipo `DownloadProcesso`; esta versión no descarga
@@ -143,9 +153,10 @@ La raíz predeterminada es `data/` **del directorio de ejecución**. Se puede fi
 `--storage-root /ruta/data` o `DATAJUD_STORAGE_ROOT`. Use la misma raíz para reanudar.
 Hay un bloqueo por raíz, un solo trabajador y permisos 0750 en directorios / 0640 en archivos.
 
-Esta entrega recrea una sola vez el antiguo `data/` autorizado. El programa no borra datos
-al arrancar, no migra catálogos históricos y rechaza esquemas anteriores indicando que
-necesita un almacenamiento vacío. `external/dataset` y las descargas externas se conservan.
+El reinicio de adhesiones archiva los resultados anteriores bajo `data/backups/`, con
+inventario, diario de movimientos y copia consistente de SQLite; conserva los originales.
+El scraper no borra datos al arrancar, no migra catálogos históricos y rechaza esquemas
+anteriores indicando que necesita un almacenamiento vacío. `external/dataset` y las descargas externas se conservan.
 El dataset y su metadata se versionan en `external/dataset/`. Los PDF, informes y la base
 SQLite generados permanecen en `data/`, excluido de Git.
 
