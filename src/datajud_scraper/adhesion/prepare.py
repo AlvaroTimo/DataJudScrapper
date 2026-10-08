@@ -45,7 +45,7 @@ def exposed_documents(root, excluded_manifests=()):
             path = work / name
             if path.exists():
                 excluded.update(r["document_id"] for r in read_json(path).get("documents", []))
-        for name in ("runs", "reference"):
+        for name in ("runs", "reference", "extractions"):
             folder = work / name
             if folder.is_dir():
                 excluded.update(p.name for p in folder.iterdir() if p.is_dir())

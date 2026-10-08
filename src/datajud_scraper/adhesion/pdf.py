@@ -42,7 +42,9 @@ def region_rotation(region: dict) -> int:
     return rotation
 
 
-def render_contract_page(source, region: dict, *, dpi: int = 240, with_geometry=False):
+def render_contract_page(
+    source, region: dict, *, dpi: int = 240, with_geometry=False, raster_source=False
+):
     import pymupdf
     from PIL import Image
 
@@ -51,7 +53,17 @@ def render_contract_page(source, region: dict, *, dpi: int = 240, with_geometry=
     if type(page_number) is not int or not 1 <= page_number <= source.page_count:
         raise ValueError("pagina fuente fuera de rango")
     page = source[page_number - 1]
-    pixmap = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False, annots=True)
+    if raster_source:
+        if rotation or region.get("rect", [0, 0, 1, 1]) != [0, 0, 1, 1] or page.rotation:
+            raise ValueError("a phase input must be a complete unrotated raster page")
+        images = page.get_images()
+        if len(images) != 1 or page.get_text().strip() or list(page.annots() or []):
+            raise ValueError("invalid extracted raster contract")
+        pixmap = pymupdf.Pixmap(source, images[0][0])
+        if pixmap.n != 3:
+            raise ValueError("extracted contract must contain RGB pixels")
+    else:
+        pixmap = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False, annots=True)
     image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
     source_size = image.size
     box = pixel_box(region.get("rect", [0, 0, 1, 1]), image.width, image.height)
@@ -158,6 +170,7 @@ def write_cleaned_contract(
     *,
     dpi: int = 240,
     decision_mode: str = "manual",
+    raster_source: bool = False,
 ) -> dict:
     """Build a draft; caller must separately verify identity, reviews and release gates."""
     import pymupdf
@@ -176,7 +189,9 @@ def write_cleaned_contract(
     try:
         with pymupdf.open(source_path) as source, pymupdf.open() as result:
             for number, region in enumerate(regions, 1):
-                original = render_contract_page(source, region, dpi=dpi)
+                original = render_contract_page(
+                    source, region, dpi=dpi, raster_source=raster_source
+                )
                 cleaned, boxes = redact_pixels(
                     original, masks_by_page.get(number, []), decision_mode=decision_mode
                 )

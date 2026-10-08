@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .common import read_json, workspace, workspace_scope
+from .common import read_json, readonly, workspace, workspace_scope
 
 
 def main(argv=None):
@@ -31,6 +31,14 @@ def main(argv=None):
     select = run.add_mutually_exclusive_group(required=True)
     select.add_argument("--manifest", type=Path)
     select.add_argument("--document")
+    extract = sub.add_parser(
+        "extract", help="phase 1: save private contract PDFs without anonymizing"
+    )
+    extract_select = extract.add_mutually_exclusive_group(required=True)
+    extract_select.add_argument("--manifest", type=Path)
+    extract_select.add_argument("--document")
+    clean = sub.add_parser("anonymize", help="phase 2: anonymize an existing extraction")
+    clean.add_argument("--extraction-manifest", type=Path, required=True)
     sub.add_parser("reference", help="blind AI visual review of EVERY source page of the holdout")
     sub.add_parser(
         "review", help="render original/cleaned pairs; rendering is not review"
@@ -62,27 +70,67 @@ def dispatch(parser, args):
             result = freeze(root, model)
         finally:
             model.close()
-    elif args.command == "run":
-        from .pipeline import configuration, run_document, run_manifest
+    elif args.command in ("run", "extract"):
+        from .pipeline import configuration, extract_document, run_document, run_manifest
         from .vision import LocalModel
 
         if args.manifest:
-            return run_manifest(root, args.manifest)
-        sources = read_json(workspace(root) / "corpus.json")["documents"]
+            return run_manifest(root, args.manifest, phase=args.command)
+        corpus_path = workspace(root) / "corpus.json"
+        if corpus_path.exists():
+            sources = read_json(corpus_path)["documents"]
+        else:
+            with readonly(root / "state/scraper.sqlite3") as connection:
+                sources = [
+                    dict(r)
+                    for r in connection.execute(
+                        "SELECT document_id,case_id,relative_path,sha256,page_count FROM documents "
+                        "WHERE document_id=? AND validation_status='valid'",
+                        (args.document,),
+                    )
+                ]
         source = next((s for s in sources if s["document_id"] == args.document), None)
         if source is None:
-            parser.error("document not in prepared corpus")
-        test_ids = {
-            r["document_id"] for r in read_json(workspace(root) / "holdout.json")["documents"]
-        }
+            parser.error("document not in prepared corpus or download catalog")
+        holdout_path = workspace(root) / "holdout.json"
+        test_ids = (
+            {r["document_id"] for r in read_json(holdout_path)["documents"]}
+            if holdout_path.exists()
+            else set()
+        )
         model = LocalModel(workspace(root) / "model-cache")
         try:
-            result = run_document(
+            role = (
+                "scraper"
+                if args.workspace == "adhesion-scraper"
+                else ("holdout" if args.document in test_ids else "development")
+            )
+            runner = extract_document if args.command == "extract" else run_document
+            result = runner(
                 root,
                 source,
                 model,
-                configuration(model),
-                role="holdout" if args.document in test_ids else "development",
+                configuration(
+                    model,
+                    include_privacy=args.command != "extract" or role == "holdout",
+                    include_reference=role == "holdout",
+                ),
+                role=role,
+            )
+        finally:
+            model.close()
+    elif args.command == "anonymize":
+        from .pipeline import anonymize_extraction, configuration
+        from .vision import LocalModel
+
+        extraction = read_json(args.extraction_manifest)
+        model = LocalModel(workspace(root) / "model-cache")
+        try:
+            result = anonymize_extraction(
+                root,
+                args.extraction_manifest,
+                model,
+                configuration(model, include_reference=extraction["role"] == "holdout"),
             )
         finally:
             model.close()
