@@ -7,4 +7,8 @@ __pycache__/
 build/
 dist/
 /data/
+.chart-data-*/
+.codex-build/
+/output/
+/tmp/
 .DS_Store
