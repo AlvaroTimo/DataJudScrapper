@@ -4,7 +4,72 @@ El alcance de la versión nueva son instrumentos completos de adhesión a tarjet
 incluidos títulos equivalentes y propuestas de emisión con aceptación. Excluye CCB,
 saques, reglamentos independientes, consentimientos separados, seguros independientes,
 informes biométricos y fragmentos dentro de escritos. Conserva las cláusulas y los anexos
-que integran el propio termo. No elimina originales.
+que integran el propio termo. El procesamiento operativo del scraper aplica retención
+configurable; las cohortes de evaluación conservan sus originales.
+
+## Fases independientes e integración con el scraper
+
+La versión `complete_card_adhesion_phases_v3` conserva la detección híbrida por índice y
+contenido, y divide el procesamiento en dos pasos:
+
+1. **Extracción:** detecta instrumentos y valida páginas, recortes y rotación. Publica un
+   PDF sin anonimizar por contrato y un manifiesto de extracción. Guarda en privado el
+   inventario de palabras y geometría trasladado al recorte. Esta fase no llama al anonimizador.
+2. **Anonimización:** consume esos PDF y su inventario, vinculados por SHA-256. Aplica máscaras,
+   relee la salida y comprueba privacidad y conservación. No necesita el expediente original
+   ni repite la detección. Las máscaras usan los píxeles RGB exactos del PDF extraído;
+   no se vuelve a renderizar a una resolución que pueda desplazar coordenadas.
+
+Las fases tienen configuración, caché, bloqueo, progreso y manifiestos separados.
+Cambiar únicamente la configuración de privacidad reutiliza la extracción compatible.
+Un fallo en la segunda fase conserva la primera y permite reanudar sus decisiones por página.
+Los artefactos ausentes o alterados no se aceptan como caché válida. Si se necesita extraer
+de nuevo después de una purga, se crea una generación nueva sin sobrescribir manifiestos anteriores.
+
+El scraper usa un espacio operativo independiente: `data/adhesion-scraper/`.
+
+| Ruta relativa al espacio operativo | Artefacto |
+| --- | --- |
+| `extracted/<configuración>/<documento>/` | Contratos sin anonimizar, fase 1. |
+| `extractions/<documento>/<extracción>/manifest.json` | Páginas, recortes, huellas y resultados de detección. |
+| `outputs/<configuración>/accepted/<ejecución>/` | Contratos que superan los controles automáticos, fase 2. |
+| `outputs/<configuración>/quarantine/<ejecución>/` | Contratos pendientes de revisión. |
+| `runs/<documento>/<ejecución>/manifest.json` | Decisiones y comprobaciones de anonimización. |
+| `scraper-releases/<documento>.json` | Estado de entrega y limpieza para reanudar el scraper. |
+
+El valor por defecto es `--contract-mode both --contract-retention purge`: cada descarga
+se valida, extrae y anonimiza antes de pasar al siguiente registro. Cuando el estado global
+es `completed`, hay al menos una salida lista y se verifican sus huellas, se eliminan el
+original, los contratos sin anonimizar y el OCR/caché privado del documento en ese espacio.
+La limpieza tiene diario persistente y puede reanudarse aun cuando ya haya eliminado
+el original. Los manifiestos y las salidas anonimizadas se conservan.
+
+Errores, detección pendiente, cuarentena y `no_target` conservan las fuentes. Un fallo de
+fase figura como `contract_processing_error` y se reintenta con `resume --retry-failed`;
+una salida incierta produce `processing_needs_review` y `completed_with_errors`.
+Los controles son automáticos y no equivalen a una revisión humana ni a una garantía
+de ausencia de datos sensibles. La activación operativa no sustituye el piloto independiente.
+
+Para inspeccionar ambas fases, añadir `--contract-retention keep` al scraper.
+Para ejecutar únicamente la extracción, usar `--contract-mode extract`; para descargar sin
+procesamiento, `--contract-mode none`. Estos últimos dos modos conservan originales.
+Las variables equivalentes son `DATAJUD_CONTRACT_MODE` y `DATAJUD_CONTRACT_RETENTION`.
+`report.md` y `results.jsonl` permiten localizar los documentos de cada fase. Con `purge`,
+los enlaces a PDF privados se sustituyen por el registro de su eliminación.
+
+También se pueden ejecutar las fases de forma independiente sobre un documento del catálogo:
+
+```bash
+.venv/bin/datajud-adhesion --workspace adhesion-scraper extract --document <document-id>
+.venv/bin/datajud-adhesion --workspace adhesion-scraper anonymize \
+  --extraction-manifest /ruta/data/adhesion-scraper/extractions/<documento>/<extracción>/manifest.json
+```
+
+El comando `extract` devuelve la ruta del manifiesto que recibe `anonymize`.
+Estos comandos independientes publican artefactos y conservan las fuentes: la política
+automática de limpieza se aplica durante la integración con el scraper. Para extraer
+desde el catálogo no hace falta preparar una cohorte. Los comandos de evaluación y los
+documentos reservados mantienen sus controles de selección y congelación.
 
 ## Resultado del primer piloto
 
@@ -51,7 +116,7 @@ máscaras antiguas. Si un inventario antiguo no registra hashes de modelos y ver
 runtime OCR compatibles, se vuelve a reconocer la página. El uso selectivo y la reutilización
 de OCR siguen el principio descrito
 en la [documentación de PyMuPDF](https://pymupdf.readthedocs.io/en/latest/recipes-ocr.html).
-La versión `complete_card_adhesion_index_v2` sigue este flujo:
+La detección por índice de `complete_card_adhesion_phases_v3` sigue este flujo:
 
 1. Lee marcadores y enlaces del índice, convierte sus destinos en páginas físicas y
    comprueba que los rangos cubran el PDF sin huecos ni solapamientos. Si el índice falta

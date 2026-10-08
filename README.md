@@ -1,14 +1,17 @@
 # DataJud Scraper
 
-La extracción se limita a **termos y documentos equivalentes de adhesión a tarjetas**,
-completos y separados del expediente. El nuevo flujo detecta instrumentos, aplica máscaras
-y comprueba limpieza y conservación. Tiene estado independiente, backup verificable,
-30 casos de desarrollo y una muestra aleatoria reservada de 25 procesos.
+El scraper descarga expedientes y procesa cada PDF en **dos fases independientes**:
+extracción de termos y documentos equivalentes de adhesión a tarjetas, y anonimización
+de los contratos extraídos. Ambas se ejecutan por defecto después de validar cada descarga.
+Después de superar todos los controles automáticos, elimina el original y los contratos
+sin anonimizar; la conservación es configurable. Cada fase tiene PDF, manifiesto y estado propios.
 Consulte la [metodología, comandos y evaluación](docs/adhesion.md).
 Los controles automáticos y la revisión visual asistida por IA se registran por separado.
 
-**El primer piloto no alcanzó el 80 % requerido.** La ejecución completa del lote quedó
-deshabilitada. Consulte los [resultados y limitaciones](docs/adhesion-pilot-20260920.md).
+**El primer piloto no alcanzó el 80 % requerido.** El comando de corpus de evaluación
+conserva ese requisito. La integración operativa del scraper utiliza `adhesion-scraper`,
+separado de las cohortes de evaluación; su activación no acredita una nueva tasa de calidad.
+Consulte los [resultados y limitaciones](docs/adhesion-pilot-20260920.md).
 
 Importa el dataset JSONL de PROJUDI/TJBA y descarga sus PDF consolidados mediante lotes
 reanudables. Conserva todos los registros y la metadata original, incluidos campos extra.
@@ -20,11 +23,55 @@ documentos individuales de `DownloadArquivo`.
 Compatible con macOS y Linux. Desde la raíz del proyecto:
 
 ```bash
-uv sync --locked --extra dev
+uv sync --locked --extra dev --extra contracts
 ```
 
 `.python-version` fija Python 3.14.0; `uv.lock` fija las dependencias y sus hashes.
 No es necesario activar el entorno virtual.
+
+Para los modos `both` y `extract`, prepare el OCR de extracción y el modelo local.
+El modo `both` requiere además OCR de anonimización:
+
+```bash
+.venv/bin/python -m datajud_scraper.ocr_models --quality fast
+.venv/bin/python -m datajud_scraper.ocr_models --quality best
+.venv/bin/python -m datajud_scraper.adhesion.ocr
+.venv/bin/python scripts/setup_local_model.py --model qwen3.5:27b
+```
+
+También debe estar disponible Tesseract. En Linux, `scripts/setup_table_ocr.py` prepara
+el runtime local soportado; los scripts de instalación de runtimes requieren Linux.
+El servicio de inferencia debe responder en `127.0.0.1:11434`. Los modelos se descargan
+durante la preparación; el procesamiento de documentos usa inferencia local.
+Si falta el backend, el lote se pausa con `contract_processing_unavailable` **antes de
+descargar el PDF**. `--contract-mode none` permite descargar sin esos requisitos.
+
+## Fases y conservación
+
+| Modo | Comportamiento |
+| --- | --- |
+| `--contract-mode both` (predeterminado) | Descarga → extracción → anonimización → controles → limpieza de fuentes privadas. |
+| `--contract-mode extract` | Descarga y guarda contratos sin anonimizar para inspección o anonimización posterior. |
+| `--contract-mode none` | Descarga y valida el expediente. |
+
+`--contract-retention purge` es el valor por defecto. Solo elimina fuentes cuando **todos**
+los contratos detectados superan los controles de privacidad y conservación, la búsqueda
+queda resuelta y existe al menos una salida anonimizada cuyo hash se verifica. Conserva
+originales ante errores, dudas o ausencia de contratos. También elimina los inventarios
+OCR y cachés privados del documento en el espacio operativo. Conserva los manifiestos,
+las huellas y los PDF anonimizados. El borrado es de archivos locales; no borra backups
+históricos ni garantiza eliminación física de bloques del disco.
+
+Para revisar los PDF de ambas fases, use `--contract-retention keep` desde el inicio.
+`extract` y `none` conservan sus fuentes independientemente de esta opción. Cambiar a
+`keep` no recupera archivos ya eliminados. Cada `resume` recibe sus propias opciones;
+para continuar una extracción con anonimización, use `resume <batch-id> --contract-mode both`.
+
+`results.jsonl` registra `contract_processing`, con estado, retención y rutas por fase,
+además de `contract_paths`. `report.md` enlaza los documentos y manifiestos. Los contratos
+inciertos figuran en cuarentena y el lote termina con `processing_needs_review` /
+`completed_with_errors`; no se presentan como salidas listas. La anonimización puede
+reanudarse desde el manifiesto de extracción sin repetir la búsqueda del contrato.
 
 ## Piloto y lotes
 
@@ -91,7 +138,10 @@ infraestructura requiere ese indicador para reabrir los intentos; las pausas tem
 siguen respetando su fecha incluso con él.
 
 Los PDF existentes se comprueban localmente. Si siguen válidos, el resultado es
-`already_exists`, sin acceso a la red ni duplicados. Los ausentes o corruptos se reparan.
+`already_exists`, sin acceso a la red ni duplicados; se ejecutan las fases pendientes según
+el modo seleccionado. Si el original fue eliminado tras una anonimización verificada,
+`contracts_preserved` reutiliza las salidas comprobadas sin volver a descargar.
+Los ausentes o corruptos sin salidas verificadas se reparan.
 `--refresh` permite verificar la ficha y solicitar una nueva captura; un SHA-256 idéntico
 produce `unchanged`, y uno nuevo conserva una nueva versión. Las omisiones por secreto
 se mantienen al reanudar salvo `--refresh`; un lote nuevo vuelve a consultar su estado.
@@ -137,6 +187,7 @@ determinarlo. Un PDF cuyo CNJ no coincide nunca se publica.
 ```text
 data/
   pdfs/<año>/<CNJ>/     PDF validados, con fecha y huella en el nombre
+  adhesion-scraper/     Extracciones, anonimizaciones, estado y manifiestos por fase
   state/               SQLite, bloqueo y estado global de peticiones
   reports/<batch-id>/   Manifiesto e informes
   logs/                Eventos JSONL sin cookies ni HTML
@@ -151,7 +202,9 @@ conservan su historial. Un índice por lote y posición permite consultar ese hi
 
 La raíz predeterminada es `data/` **del directorio de ejecución**. Se puede fijar con
 `--storage-root /ruta/data` o `DATAJUD_STORAGE_ROOT`. Use la misma raíz para reanudar.
-Hay un bloqueo por raíz, un solo trabajador y permisos 0750 en directorios / 0640 en archivos.
+Hay un bloqueo por raíz y un solo trabajador. Los archivos del scraper usan permisos
+0750 en directorios / 0640 en archivos; los PDF y manifiestos de las fases usan 0600,
+con directorios privados de trabajo 0700.
 
 El reinicio de adhesiones archiva los resultados anteriores bajo `data/backups/`, con
 inventario, diario de movimientos y copia consistente de SQLite; conserva los originales.
@@ -198,11 +251,13 @@ opciones si había personalizado la consulta o los límites.
 | `--log-retention-days` | `DATAJUD_LOG_RETENTION_DAYS` | 30 |
 | `--stale-temp-hours` | `DATAJUD_STALE_TEMP_HOURS` | 24 |
 | `--challenge-cooldown-seconds` | `DATAJUD_CHALLENGE_COOLDOWN_SECONDS` | 3600 |
+| `--contract-mode` | `DATAJUD_CONTRACT_MODE` | `both` |
+| `--contract-retention` | `DATAJUD_CONTRACT_RETENTION` | `purge` |
 
 
 Los timeouts de lectura limitan la espera entre bloques recibidos. El tamaño de los archivos
 y el espacio libre se comprueban antes y durante la descarga. Cookies y HTML permanecen
-solo en memoria; los PDF originales se guardan completos.
+solo en memoria; la retención de los PDF originales sigue la política descrita arriba.
 
 ```bash
 .venv/bin/datajud-scraper scrape-dataset --help
@@ -214,7 +269,7 @@ solo en memoria; los PDF originales se guardan completos.
 ```bash
 .venv/bin/pytest
 .venv/bin/ruff check .
-uv sync --locked --extra dev --check
+uv sync --locked --extra dev --extra contracts --check
 ```
 
 Las pruebas incluyen un servidor HTTP/1.1 local que exige la misma conexión y cookie,
@@ -222,6 +277,9 @@ comprueba más de cinco segundos de inactividad y fuerza un cambio de conexión.
 cubren importación idempotente, selección sin reemplazos, secreto actual, identidad errónea,
 ficha sin botón, sesión expirada, CAPTCHA, 429, PDF inválido o ajeno, reparación, interrupción,
 publicación atómica y recuperación de estados abandonados. No hacen peticiones a PROJUDI.
+También verifican separación de fases, píxeles y coordenadas, los tres modos, retención,
+cuarentena, fallos de anonimización, borrado interrumpido y reanudación sin descarga.
+Esas pruebas utilizan respuestas sintéticas del modelo; no miden su precisión en documentos reales.
 La prueba del dataset completo se omite cuando el dataset local no está presente.
 
 El piloto real revisa además visualmente la primera y última página de cada PDF entregado.
