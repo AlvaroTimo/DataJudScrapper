@@ -6,18 +6,26 @@ import argparse
 import json
 from pathlib import Path
 
-from .common import read_json, workspace
+from .common import read_json, workspace, workspace_scope
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--storage-root", type=Path, default=Path("data"))
+    parser.add_argument("--workspace", default="adhesion-v1", help="isolated adhesion-* cohort")
     sub = parser.add_subparsers(dest="command", required=True)
     prepare = sub.add_parser(
         "prepare", help="archive legacy outputs and freeze independent samples"
     )
     prepare.add_argument("--batch", required=True)
     prepare.add_argument("--seed", type=int, default=20260920)
+    prepare.add_argument(
+        "--exclude-manifest",
+        type=Path,
+        action="append",
+        default=[],
+        help="exclude previously inspected sample documents (repeatable)",
+    )
     sub.add_parser("freeze", help="freeze code, model and rules before blind evaluation")
     run = sub.add_parser("run", help="run a development, holdout or corpus manifest")
     select = run.add_mutually_exclusive_group(required=True)
@@ -33,11 +41,18 @@ def main(argv=None):
     sub.add_parser("verify-backup")
     sub.add_parser("restore-backup").add_argument("archive", type=Path)
     args = parser.parse_args(argv)
+    if not args.workspace.startswith("adhesion-") or any(c in args.workspace for c in "/\\."):
+        parser.error("workspace must be an adhesion-* directory name")
+    with workspace_scope(args.storage_root, args.workspace):
+        return dispatch(parser, args)
+
+
+def dispatch(parser, args):
     root = args.storage_root.resolve()
     if args.command == "prepare":
         from .prepare import prepare
 
-        result = prepare(root, args.batch, seed=args.seed)
+        result = prepare(root, args.batch, seed=args.seed, excluded_manifests=args.exclude_manifest)
     elif args.command == "freeze":
         from .pipeline import freeze
         from .vision import LocalModel

@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,8 +48,29 @@ def readonly(path):
     return connection
 
 
+_WORKSPACE = ContextVar("adhesion_workspace", default=None)
+
+
 def workspace(root):
-    return Path(root).resolve() / "adhesion-v1"
+    root = Path(root).resolve()
+    selected = _WORKSPACE.get()
+    return selected[1] if selected and selected[0] == root else root / "adhesion-v1"
+
+
+@contextmanager
+def workspace_scope(root, name="adhesion-v1"):
+    """Isolate a new cohort without moving originals or altering historical evidence."""
+    if not re.fullmatch(r"adhesion-[a-zA-Z0-9][a-zA-Z0-9_-]*", name):
+        raise ValueError("workspace must be an adhesion-* directory name")
+    root = Path(root).resolve()
+    target = root / name
+    if target.resolve().parent != root:
+        raise ValueError("workspace outside storage root")
+    token = _WORKSPACE.set((root, target))
+    try:
+        yield target
+    finally:
+        _WORKSPACE.reset(token)
 
 
 def source_path(root, source):

@@ -27,18 +27,56 @@ def freeze_split(rows, excluded, *, seed=20260920, holdout_size=25, development_
     return test, development
 
 
-def prepare(root, batch_id, *, seed=20260920):
+def exposed_documents(root, excluded_manifests=()):
+    excluded = set()
+    manifest_hashes = {}
+    for path in excluded_manifests:
+        path = Path(path).resolve()
+        value = read_json(path)
+        rows = value.get("documents")
+        if not isinstance(rows, list) or any(
+            not isinstance(r.get("document_id"), str) or not r["document_id"] for r in rows
+        ):
+            raise ValueError("invalid prior-exposure manifest")
+        excluded.update(r["document_id"] for r in rows)
+        manifest_hashes[str(path)] = digest(value)
+    for work in root.glob("adhesion-*"):
+        for name in ("holdout.json", "development.json", "development-existing.json"):
+            path = work / name
+            if path.exists():
+                excluded.update(r["document_id"] for r in read_json(path).get("documents", []))
+        for name in ("runs", "reference"):
+            folder = work / name
+            if folder.is_dir():
+                excluded.update(p.name for p in folder.iterdir() if p.is_dir())
+    return excluded, manifest_hashes
+
+
+def prepare(root, batch_id, *, seed=20260920, excluded_manifests=()):
     root = Path(root).resolve()
     work = workspace(root)
+    exposed, manifest_hashes = exposed_documents(root, excluded_manifests)
     if (work / "preparation.json").exists():
         previous = read_json(work / "preparation.json")
-        if previous["batch_id"] != batch_id or previous["seed"] != seed:
+        if (
+            previous["batch_id"] != batch_id
+            or previous["seed"] != seed
+            or previous.get("exclusion_manifests", {}) != manifest_hashes
+        ):
             raise ValueError("another corpus or seed is already frozen")
         # Restoring and preparing again must not resample the untouched holdout.
-        previous["archive"] = archive(root)["path"]
-        write_json(work / "preparation.json", previous)
+        if work == root / "adhesion-v1":
+            previous["archive"] = archive(root)["path"]
+            write_json(work / "preparation.json", previous)
         return previous
-    journal = archive(root)
+    legacy = root / "adhesion-v1"
+    if work != legacy and (legacy / "preparation.json").exists():
+        prior = read_json(legacy / "preparation.json")
+        if prior["batch_id"] != batch_id:
+            raise ValueError("new cohort must use the existing prepared corpus")
+        journal = read_json(legacy / "archive.json")
+    else:
+        journal = archive(root)
     backup = Path(journal["path"])
     with readonly(backup / "state/scraper.sqlite3") as connection:
         rows = [
@@ -54,7 +92,7 @@ def prepare(root, batch_id, *, seed=20260920):
         tables = {
             r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-        excluded = set()
+        excluded = set(exposed)
         for table in ("contract_page_reviews", "card_automation_runs", "card_validation_reviews"):
             if table in tables:
                 excluded.update(
@@ -83,6 +121,7 @@ def prepare(root, batch_id, *, seed=20260920):
     if not rows or len({r["case_id"] for r in rows}) != len(rows):
         raise ValueError("corpus must contain one original per case")
     holdout, development = freeze_split(rows, excluded, seed=seed)
+    write_json(work / "archive.json", journal)
     corpus = {"batch_id": batch_id, "documents": rows, "sha256": digest(rows)}
     write_json(work / "corpus.json", corpus)
     for name, selected in (("holdout", holdout), ("development", development)):
@@ -113,6 +152,7 @@ def prepare(root, batch_id, *, seed=20260920):
         "created_at": now(),
         "batch_id": batch_id,
         "seed": seed,
+        "exclusion_manifests": manifest_hashes,
         "archive": str(backup),
         "corpus": len(rows),
         "available": sum(r["available"] for r in rows),
