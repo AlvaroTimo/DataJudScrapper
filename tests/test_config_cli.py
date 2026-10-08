@@ -23,6 +23,17 @@ def isolated_environment(monkeypatch):
 def test_default_storage_is_data_in_working_directory(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     assert ScraperConfig.from_env().storage_root == tmp_path / "data"
+    assert ScraperConfig.from_env().contract_mode == "both"
+    assert ScraperConfig.from_env().contract_retention == "purge"
+
+
+def test_contract_configuration_environment_and_explicit_precedence(monkeypatch):
+    monkeypatch.setenv("DATAJUD_CONTRACT_MODE", "extract")
+    monkeypatch.setenv("DATAJUD_CONTRACT_RETENTION", "keep")
+    config = ScraperConfig.from_env()
+    assert config.contract_mode == "extract" and config.contract_retention == "keep"
+    config = ScraperConfig.from_env(contract_mode="none", contract_retention="purge")
+    assert config.contract_mode == "none" and config.contract_retention == "purge"
 
 
 def test_environment_and_explicit_precedence(tmp_path, monkeypatch) -> None:
@@ -62,6 +73,8 @@ def test_environment_and_explicit_precedence(tmp_path, monkeypatch) -> None:
         ("USER_AGENT", "test\r\nInjected: value"),
         ("STORAGE_ROOT", ""),
         ("BOOTSTRAP_URL", "https://example.com/session"),
+        ("CONTRACT_MODE", "anonymize"),
+        ("CONTRACT_RETENTION", "invalid"),
     ],
 )
 def test_invalid_configuration_fails_before_storage_or_network(
@@ -105,6 +118,8 @@ def test_cli_download_uses_local_data_and_overrides_invalid_environment(
         str(metadata),
         "--max-pdf-bytes",
         str(len(valid_pdf)),
+        "--contract-mode",
+        "none",
         "--min-request-interval-seconds",
         "0",
         "--max-request-jitter-seconds",

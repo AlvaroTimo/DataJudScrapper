@@ -50,6 +50,10 @@ class BusyError(StorageError):
     code = "storage_busy"
 
 
+class ContractProcessingError(ScraperError):
+    code = "contract_processing_error"
+
+
 class IdentityError(ParseError):
     code = "identity_mismatch"
 

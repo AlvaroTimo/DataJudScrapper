@@ -144,6 +144,7 @@ def test_config(tmp_path):
         max_request_jitter_seconds=0,
         min_free_bytes=0,
         lock_timeout_seconds=0,
+        contract_mode="none",
     ).normalized()
 
 

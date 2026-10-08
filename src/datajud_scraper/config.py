@@ -29,6 +29,8 @@ class ScraperConfig:
     log_retention_days: int = 30
     stale_temp_hours: int = 24
     challenge_cooldown_seconds: int = 3600
+    contract_mode: str = "both"
+    contract_retention: str = "purge"
 
     @classmethod
     def from_env(
@@ -74,6 +76,10 @@ class ScraperConfig:
         except InvalidInputError as exc:
             raise ValueError(f"bootstrap_url invalida: {exc}") from exc
         root = self.storage_root.expanduser().resolve(strict=False)
+        if self.contract_mode not in ("both", "extract", "none"):
+            raise ValueError("contract_mode debe ser both, extract o none")
+        if self.contract_retention not in ("keep", "purge"):
+            raise ValueError("contract_retention debe ser keep o purge")
         if not self.user_agent.strip() or any(
             ord(char) < 32 or ord(char) > 126 for char in self.user_agent
         ):

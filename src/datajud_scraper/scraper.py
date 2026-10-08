@@ -22,6 +22,7 @@ from .config import ScraperConfig
 from .dataset import CASE_PATH, DOWNLOAD_PATH, DatasetRecord
 from .errors import (
     AccessChallengeError,
+    ContractProcessingError,
     FetchError,
     IdentityError,
     NotFoundError,
@@ -84,6 +85,50 @@ class ScraperService:
         self.paths = StoragePaths(self.config.storage_root)
         self.paths.initialize()
         self.logger = EventLogger(self.paths, self.config)
+        self._contract_processor = None
+
+    def close(self):
+        if self._contract_processor is not None:
+            self._contract_processor.close()
+
+    def _prepare_contracts(self):
+        if self.config.contract_mode == "none":
+            return None
+        if self._contract_processor is None:
+            from .contract_processing import ContractProcessor
+
+            self._contract_processor = ContractProcessor(self.config, self.logger)
+        self._contract_processor.prepare()
+        return self._contract_processor
+
+    def _processed_result(self, stored, result):
+        if self.config.contract_mode == "none":
+            return result
+        try:
+            release = self._prepare_contracts().process(stored)
+        except PauseError:
+            raise
+        except Exception as exc:
+            raise ContractProcessingError(
+                "fallo en el procesamiento de contratos; se conserva el estado para reanudar"
+            ) from exc
+        return self._result_with_processing(result, release)
+
+    @staticmethod
+    def _result_with_processing(result, release):
+        return replace(
+            result,
+            status="processing_needs_review"
+            if release["status"] == "needs_review"
+            else result.status,
+            pdf_path=result.pdf_path if release["source_retained"] else None,
+            contract_count=len(release["outputs"]),
+            contract_paths=tuple(Path(o["path"]) for o in release["outputs"]),
+            contract_processing={
+                "download_status": result.status,
+                **{k: release[k] for k in ("mode", "status", "source_retained", "phases")},
+            },
+        )
 
     def scrape_record(
         self,
@@ -104,7 +149,9 @@ class ScraperService:
             and not refresh
             and self._existing_is_valid(database, existing, run_id)
         ):
-            return self._result_from_stored(existing, "already_exists", run_id)
+            return self._processed_result(
+                existing, self._result_from_stored(existing, "already_exists", run_id)
+            )
         blocked = database.get_access_blocked_until()
         if blocked and blocked > time.time():
             raise PauseError("access_cooldown", "cooldown de acceso activo", blocked)
@@ -204,6 +251,7 @@ class ScraperService:
                         need_context = False
                     if budget["pdf"] >= self.config.pdf_attempts:
                         raise FetchError("se agotaron los intentos de descargar el PDF")
+                    self._prepare_contracts()
                     budget["pdf"] += 1
                     database.increment_attempt(run_id, "pdf")
                     self.paths.remove_managed_file(temp)
@@ -245,7 +293,9 @@ class ScraperService:
             if preserved:
                 return preserved
             if duplicate and self._existing_is_valid(database, duplicate, run_id):
-                return self._result_from_stored(duplicate, "unchanged", run_id)
+                return self._processed_result(
+                    duplicate, self._result_from_stored(duplicate, "unchanged", run_id)
+                )
             retrieved = self.now()
             final, relative = self.paths.final_file(
                 metadata, retrieved, downloaded.validation.sha256
@@ -269,7 +319,7 @@ class ScraperService:
             except (sqlite3.Error, StorageError) as exc:
                 self.paths.remove_managed_file(final)
                 raise StorageError("no se pudo catalogar el PDF") from exc
-            return ScrapeResult(
+            result = ScrapeResult(
                 "downloaded",
                 metadata.process_number,
                 metadata.distribution_at,
@@ -282,6 +332,8 @@ class ScraperService:
                 downloaded.validation.page_count,
                 run_id,
             )
+            stored = database.find_valid_by_hash(case_id, downloaded.validation.sha256)
+            return self._processed_result(stored, result)
         finally:
             client.close()
             self.paths.remove_managed_file(temp)
@@ -512,6 +564,22 @@ class ScraperService:
         self, database: Database, stored: StoredCaseDocument, run_id: str
     ) -> ScrapeResult | None:
         from .adhesion.archive import archived_release
+
+        release_path = (
+            self.paths.root / "adhesion-scraper/scraper-releases" / f"{stored.document_id}.json"
+        )
+        if self.config.contract_mode == "both" and release_path.exists():
+            try:
+                release = self._prepare_contracts().cached(stored)
+            except PauseError:
+                raise
+            except Exception as exc:
+                raise ContractProcessingError("salida de contratos ausente o alterada") from exc
+            if release and not release["source_retained"]:
+                result = self._result_from_stored(stored, "already_exists", run_id)
+                return self._result_with_processing(
+                    replace(result, status="contracts_preserved"), release
+                )
 
         archived = archived_release(self.paths.root, stored.document_id)
         if archived is not None:

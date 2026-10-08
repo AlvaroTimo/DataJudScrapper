@@ -89,7 +89,8 @@ class BatchService:
                             sampling_report(loaded.records, chosen),
                             ensure_ascii=False,
                             indent=2,
-                        ) + "\n",
+                        )
+                        + "\n",
                     )
                 return self._run(db, batch_id, refresh=refresh)
             finally:
@@ -284,7 +285,10 @@ class BatchService:
                         result["status"],
                         finished_at=utc_now(),
                         bytes_received=result["size_bytes"]
-                        if result["status"] not in ("already_exists", "contracts_preserved")
+                        if result.get("contract_processing", {}).get(
+                            "download_status", result["status"]
+                        )
+                        not in ("already_exists", "contracts_preserved")
                         else 0,
                     )
                 except (PauseError, AccessChallengeError, StorageError) as exc:
@@ -366,7 +370,9 @@ class BatchService:
                     return self._export(db, batch_id)
             with db.connection:
                 has_errors = db.connection.execute(
-                    "SELECT 1 FROM batch_items WHERE batch_id=? AND status='failed'", (batch_id,)
+                    "SELECT 1 FROM batch_items WHERE batch_id=? "
+                    "AND status IN ('failed', 'processing_needs_review')",
+                    (batch_id,),
                 ).fetchone()
                 db.connection.execute(
                     "UPDATE batches SET status=?,updated_at=? WHERE batch_id=?",
@@ -392,6 +398,10 @@ class BatchService:
             self._export(db, batch_id)
             if not isinstance(exc, KeyboardInterrupt):
                 raise
+        finally:
+            close = getattr(service, "close", None)
+            if close is not None:
+                close()
         return self._export(db, batch_id)
 
     def _summary(self, connection, batch_id):
@@ -555,6 +565,23 @@ class BatchService:
                 f"{r.get('page_count') or ''} | {r.get('size_bytes') or ''} | "
                 f"{e['elapsed_seconds']} | {e['attempts']['pdf_attempts']} |"
             )
+        processed = [e for e in entries if e["result"].get("contract_processing")]
+        if processed:
+            lines += ["", "## Fases de contratos", ""]
+            for e in processed:
+                details = e["result"]["contract_processing"]
+                lines.append(f"- {e['process_number']} ({details['mode']}):")
+                for phase, record in details["phases"].items():
+                    manifest = os.path.relpath(record["manifest_path"], folder)
+                    links = [f"[manifiesto]({manifest})"]
+                    if record.get("artifacts_available", True):
+                        links += [
+                            f"[PDF {n}]({os.path.relpath(path, folder)})"
+                            for n, path in enumerate(record["paths"], 1)
+                        ]
+                    else:
+                        links.append("PDF privados eliminados tras los controles")
+                    lines.append(f"  - {phase}: {record['status']}; " + ", ".join(links))
         lines += [
             "",
             "## Diagnostico",

@@ -29,6 +29,8 @@ CONFIG_HELP = {
     "log_retention_days": "retencion de logs en dias",
     "stale_temp_hours": "edad minima para limpiar temporales en horas",
     "challenge_cooldown_seconds": "pausa tras CAPTCHA o HTTP 403 en segundos",
+    "contract_mode": "procesamiento de contratos: both, extract o none",
+    "contract_retention": "conservar fuentes privadas (keep) o purgarlas tras controles (purge)",
 }
 
 
@@ -44,9 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     selection = scrape.add_mutually_exclusive_group()
     selection.add_argument("--limit", type=int, default=15, help="maximo de registros (15)")
     selection.add_argument("--all", action="store_true", help="procesar todo el dataset")
-    scrape.add_argument(
-        "--sample", choices=("diverse", "first", "stratified"), default="diverse"
-    )
+    scrape.add_argument("--sample", choices=("diverse", "first", "stratified"), default="diverse")
     scrape.add_argument("--seed", type=int, default=20260908)
     resume = subparsers.add_parser("resume", help="reanudar exactamente la seleccion de un lote")
     resume.add_argument("batch_id")
@@ -70,6 +70,10 @@ def _add_config_arguments(parser: argparse.ArgumentParser) -> None:
             f"--{item.name.replace('_', '-')}",
             type=Path if item.name == "storage_root" else type(item.default),
             default=None,
+            choices={
+                "contract_mode": ("both", "extract", "none"),
+                "contract_retention": ("keep", "purge"),
+            }.get(item.name),
             help=(
                 f"{CONFIG_HELP[item.name]} "
                 f"(DATAJUD_{item.name.upper()}; predeterminado: {item.default})"

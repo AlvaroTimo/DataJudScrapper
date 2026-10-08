@@ -13,6 +13,7 @@ SuccessStatus = Literal[
     "contracts_preserved",
     "secret_skipped",
     "secrecy_unknown",
+    "processing_needs_review",
 ]
 
 
@@ -63,6 +64,7 @@ class ScrapeResult:
     run_id: str
     contract_count: int | None = None
     contract_paths: tuple[Path, ...] = ()
+    contract_processing: dict | None = None
 
     def to_dict(self) -> dict[str, object]:
         result = {
@@ -81,6 +83,8 @@ class ScrapeResult:
         if self.contract_count is not None:
             result["contract_count"] = self.contract_count
             result["contract_paths"] = [str(path) for path in self.contract_paths]
+        if self.contract_processing is not None:
+            result["contract_processing"] = self.contract_processing
         return result
 
     def to_json(self) -> str:
