@@ -42,7 +42,7 @@ def region_rotation(region: dict) -> int:
     return rotation
 
 
-def render_contract_page(source, region: dict, *, dpi: int = 240):
+def render_contract_page(source, region: dict, *, dpi: int = 240, with_geometry=False):
     import pymupdf
     from PIL import Image
 
@@ -53,6 +53,7 @@ def render_contract_page(source, region: dict, *, dpi: int = 240):
     page = source[page_number - 1]
     pixmap = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False, annots=True)
     image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+    source_size = image.size
     box = pixel_box(region.get("rect", [0, 0, 1, 1]), image.width, image.height)
     image = image.crop(box)
     if rotation:
@@ -62,7 +63,70 @@ def render_contract_page(source, region: dict, *, dpi: int = 240):
             270: Image.Transpose.ROTATE_90,
         }[rotation]
         image = image.transpose(operation)
+    if with_geometry:
+        return image, {
+            "source_size": list(source_size),
+            "crop_box": list(box),
+            "rotation": rotation,
+            "output_size": list(image.size),
+        }
     return image
+
+
+def region_inventory(page, region, geometry):
+    """Map source words and images to exactly the cropped/rotated privacy pixel space."""
+    from .inventory import words_normalized
+
+    source_width, source_height = geometry["source_size"]
+    left, top, right, bottom = geometry["crop_box"]
+    width, height = right - left, bottom - top
+    rotation = geometry["rotation"]
+    output_width, output_height = geometry["output_size"]
+
+    def mapped(rect):
+        x0, y0, x1, y1 = rect
+        x0, x1 = max(left, x0 * source_width), min(right, x1 * source_width)
+        y0, y1 = max(top, y0 * source_height), min(bottom, y1 * source_height)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        corners = [(x - left, y - top) for x in (x0, x1) for y in (y0, y1)]
+        if rotation == 90:
+            corners = [(height - y, x) for x, y in corners]
+        elif rotation == 180:
+            corners = [(width - x, height - y) for x, y in corners]
+        elif rotation == 270:
+            corners = [(y, width - x) for x, y in corners]
+        return [
+            min(x for x, _ in corners),
+            min(y for _, y in corners),
+            max(x for x, _ in corners),
+            max(y for _, y in corners),
+        ]
+
+    words = []
+    for word in words_normalized(page):
+        rect = mapped(word[:4])
+        if rect:
+            words.append([*rect, word[4]])
+    image_page = {**page, "words": [[*rect, ""] for rect in page.get("image_rects", [])]}
+    images = [box for word in words_normalized(image_page) if (box := mapped(word[:4]))]
+    text = " ".join(w[4] for w in words)
+    return {
+        **page,
+        "width": output_width,
+        "height": output_height,
+        "rotation": 0,
+        "words": words,
+        "text": text,
+        "text_chars": len(text),
+        "native_text": None,
+        "image_rects": images,
+        "image_fraction": min(
+            1.0, sum((r[2] - r[0]) * (r[3] - r[1]) for r in images) / (output_width * output_height)
+        ),
+        "source_region": region,
+        "crop_geometry": geometry,
+    }
 
 
 def redact_pixels(image, masks: list[dict], *, decision_mode: str = "manual"):

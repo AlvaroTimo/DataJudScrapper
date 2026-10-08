@@ -524,6 +524,12 @@ def anonymize(model, image, page, folder):
         words, geometry = words_normalized(page), {"rotation_degrees": 0.0}
     else:
         words, geometry = deskew_words(image)
+    if page.get("source_region"):
+        geometry = {
+            **geometry,
+            "source_region": page["source_region"],
+            "crop_geometry": page["crop_geometry"],
+        }
     regions = add_graphics(build_regions(words), image, page)
     protected = protected_cells(regions)
     write_json(folder / "private-regions.json", {"regions": regions, "geometry": geometry})

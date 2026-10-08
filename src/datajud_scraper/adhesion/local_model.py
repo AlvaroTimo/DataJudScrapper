@@ -15,7 +15,7 @@ import httpx
 
 DEFAULT_MODEL = "qwen3.5:27b"
 REFERENCE_MODEL = "qwen3-vl:8b-instruct-q8_0"
-PROMPT_VERSION = "card-2026-09-20-v2"
+PROMPT_VERSION = "card-2026-10-08-index-v3"
 
 
 def canonical_hash(value) -> str:

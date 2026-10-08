@@ -346,6 +346,8 @@ def test_deskew_maps_ocr_boxes_back_to_original_pixels(monkeypatch):
 
 
 def test_document_resume_reuses_completed_pages_after_interruption(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
     import pymupdf
 
     from datajud_scraper.adhesion import pipeline
@@ -366,7 +368,15 @@ def test_document_resume_reuses_completed_pages_after_interruption(tmp_path, mon
     }
     write_json(tmp_path / "adhesion-v1/holdout.json", {"documents": []})
     pages = [page(n, "Termo cartao") for n in (1, 2)]
-    monkeypatch.setattr(pipeline, "load_inventory", lambda *args: (pages, []))
+
+    class Inventory(list):
+        attachments = []
+
+    @contextmanager
+    def inventory(*args, **kwargs):
+        yield Inventory(pages)
+
+    monkeypatch.setattr(pipeline, "open_inventory", inventory)
     monkeypatch.setattr(
         pipeline,
         "detect_with_model",

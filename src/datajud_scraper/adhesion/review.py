@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..pdf_validation import hash_file
 from .common import read_json, source_path, workspace, write_json
 from .evaluation import current_run
+from .pdf import render_contract_page
 
 
 def render_review(root, document_id):
@@ -29,6 +30,9 @@ def render_review(root, document_id):
                         "contract_id": instrument["contract_id"],
                         "source_page": number,
                         "output_page": page.number + 1,
+                        "source_region": instrument.get(
+                            "regions", [{"page": n} for n in instrument["pages"]]
+                        )[page.number],
                     }
                     for kind, image_page in (("source", original[number - 1]), ("cleaned", page)):
                         path = (
@@ -39,6 +43,18 @@ def render_review(root, document_id):
                             path.chmod(0o600)
                         pair[kind] = {"path": str(path), "sha256": hash_file(path)}
                     views.append(pair)
+                    region = pair["source_region"]
+                    if region.get("rect", [0, 0, 1, 1]) != [0, 0, 1, 1] or region.get(
+                        "rotation", 0
+                    ):
+                        path = (
+                            folder
+                            / f"{instrument['contract_id']}-{page.number + 1:03d}-source-region.png"
+                        )
+                        if not path.exists():
+                            render_contract_page(original, region, dpi=150).save(path)
+                            path.chmod(0o600)
+                        pair["source_region_view"] = {"path": str(path), "sha256": hash_file(path)}
     packet = {
         "document_id": document_id,
         "run_id": run["run_id"],

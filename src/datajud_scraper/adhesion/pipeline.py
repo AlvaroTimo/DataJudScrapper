@@ -10,8 +10,8 @@ from pathlib import Path
 from ..pdf_validation import hash_file
 from ..runtime import StorageLock
 from .common import digest, now, read_json, source_path, workspace, write_json
-from .inventory import load_inventory
-from .pdf import render_contract_page, write_cleaned_contract
+from .inventory import extraction_configuration, open_inventory
+from .pdf import region_inventory, render_contract_page, write_cleaned_contract
 from .privacy import anonymize
 from .vision import LocalModel, detect_with_model
 
@@ -36,7 +36,14 @@ def configuration(model):
         raise ValueError("independent visual reference model is not installed")
 
     return {
-        "pipeline": "complete_card_adhesion_v1",
+        "pipeline": "complete_card_adhesion_index_v2",
+        "page_inventory": extraction_configuration(),
+        "detection": {
+            "routing": "index-content-v1",
+            "fallback": "exhaustive_residual",
+            "boundary_verification": "adjacent_visual_v1",
+            "measured_regions": "v1",
+        },
         "dpi": 300,
         "code": code,
         "packages": versions,
@@ -171,8 +178,8 @@ def run_document(root, source, model, config, *, role="development"):
             "status": "error",
         }
         try:
-            pages, attachments = load_inventory(root, source)
-            with pymupdf.open(original) as pdf:
+            with pymupdf.open(original) as pdf, open_inventory(root, source, pdf=pdf) as pages:
+                attachments = pages.attachments
                 detection_path = folder / "detection.json"
                 if detection_path.exists():
                     detection = read_json(detection_path)
@@ -183,16 +190,37 @@ def run_document(root, source, model, config, *, role="development"):
                 for position, instrument in enumerate(detection["instruments"], 1):
                     contract_id = f"{run_id}-{position:03d}"
                     contract_folder = folder / contract_id
+                    regions = instrument.get(
+                        "regions", [{"page": n, "rect": [0, 0, 1, 1]} for n in instrument["pages"]]
+                    )
+                    if [r["page"] for r in regions] != instrument["pages"]:
+                        raise ValueError("contract regions do not match source pages")
                     decisions, masks = [], {}
-                    for output_number, number in enumerate(instrument["pages"], 1):
-                        page_folder = contract_folder / f"source-{number:05d}"
+                    for output_number, region in enumerate(regions, 1):
+                        number = region["page"]
+                        region_hash = digest(region)
+                        page_folder = contract_folder / f"source-{number:05d}-{region_hash[:12]}"
                         decision_path = page_folder / "privacy.json"
                         if decision_path.exists():
                             decision = read_json(decision_path)
+                            if decision.get("region_sha256") != region_hash:
+                                raise ValueError("privacy cache belongs to another contract region")
                         else:
                             page = {**pages[number - 1], "family": instrument["family"]}
-                            image = render_contract_page(pdf, {"page": number}, dpi=300)
+                            image, geometry = render_contract_page(
+                                pdf, region, dpi=300, with_geometry=True
+                            )
+                            if region.get("rect", [0, 0, 1, 1]) != [0, 0, 1, 1] or region.get(
+                                "rotation", 0
+                            ):
+                                page = region_inventory(page, region, geometry)
                             decision = anonymize(model, image, page, page_folder)
+                            decision = {
+                                **decision,
+                                "source_region": region,
+                                "region_sha256": region_hash,
+                            }
+                            write_json(decision_path, decision)
                         decisions.append(decision)
                         masks[output_number] = decision["masks"]
                     accepted = all(d["status"] == "completed" for d in decisions)
@@ -201,7 +229,6 @@ def run_document(root, source, model, config, *, role="development"):
                         output / signature / ("accepted" if accepted else "quarantine") / run_id
                     )
                     output = output / f"{contract_id}.pdf"
-                    regions = [{"page": n, "rect": [0, 0, 1, 1]} for n in instrument["pages"]]
                     output_cache = contract_folder / "output.json"
                     if output_cache.exists():
                         result = read_json(output_cache)
@@ -227,8 +254,12 @@ def run_document(root, source, model, config, *, role="development"):
                     }
                     manifest["instruments"].append(record)
                     write_json(folder / "progress.json", manifest)
-            if detection["unresolved"] or any(
-                i["status"] != "completed" for i in manifest["instruments"]
+                if hasattr(pages, "stats"):
+                    manifest["inventory_stats"] = dict(pages.stats)
+            if (
+                detection["unresolved"]
+                or not detection.get("fallback_complete", True)
+                or any(i["status"] != "completed" for i in manifest["instruments"])
             ):
                 status = "needs_review"
             else:

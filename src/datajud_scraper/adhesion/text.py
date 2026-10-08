@@ -81,6 +81,8 @@ def describe_attachments(document) -> list[dict]:
                 if text and text not in titles[target]:
                     titles[target].append(text)
             starts.setdefault(target, {"ids": [], "outline_titles": []})
+    has_index = bool(starts)
+    first_content = min(starts, default=1)
     starts.setdefault(1, {"ids": [], "outline_titles": []})
     boundaries = sorted(starts)
     attachments = []
@@ -95,7 +97,7 @@ def describe_attachments(document) -> list[dict]:
                 "end_page": end,
                 "source_attachment_id": ",".join(item["ids"]) or None,
                 "title": title or ("Indice y portada" if start < first_content else "Sin indice"),
-                "index_prefix": start == 1 and first_content > 1 and bool(outline),
+                "index_prefix": start == 1 and first_content > 1 and has_index,
                 "boundary_ambiguity": len(item["ids"]) > 1,
                 "title_evidence": contract_evidence(title, title=True),
                 "page_evidence": {},
@@ -104,15 +106,33 @@ def describe_attachments(document) -> list[dict]:
     return attachments
 
 
-def page_inventory(page, tessdata: Path) -> dict:
+def text_quality(text, words, height):
+    """Recognize corrupt nonempty text without treating numeric forms as corruption."""
+    head = " ".join(w[4] for w in words if w[1] < height * 0.24)
+    reasons = []
+    if text.count("\ufffd") > max(10, len(text) * 0.05):
+        reasons.append("replacement_characters")
+    if sum(unicodedata.category(c) in ("Co", "Cs") for c in text) > max(5, len(text) * 0.02):
+        reasons.append("unmapped_characters")
+    if (
+        len(head) > 100
+        and sum(c.isalpha() for c in head) / len(head) < 0.15
+        and len(re.findall(r"[^\w\s.,:/()%-]", head)) / len(head) > 0.25
+    ):
+        reasons.append("corrupt_heading")
+    return reasons
+
+
+def page_inventory(page, tessdata: Path, *, recognize=True, force_ocr=False, dpi=200) -> dict:
     import pymupdf
 
     native_words = page.get_text("words", sort=True)
     native_text = page.get_text(sort=True)
-    body = [word for word in native_words if word[1] < page.rect.height * 0.94]
+    source_bounds = page.rect * page.derotation_matrix
+    body = [word for word in native_words if word[1] < source_bounds.height * 0.94]
     body_chars = sum(len(word[4]) for word in body)
     images = page.get_image_info()
-    image_rects = [pymupdf.Rect(image["bbox"]) & page.rect for image in images]
+    image_rects = [pymupdf.Rect(image["bbox"]) & source_bounds for image in images]
     image_fraction = min(1.0, sum(rect.get_area() for rect in image_rects) / page.rect.get_area())
     unrecognized_image = False
     for rect in image_rects:
@@ -123,18 +143,19 @@ def page_inventory(page, tessdata: Path) -> dict:
         )
         if overlapping_chars < 80:
             unrecognized_image = True
+    quality = text_quality(native_text, native_words, source_bounds.height)
     needs_ocr = (
         unrecognized_image
         or (image_fraction > 0.1 and body_chars < 300)
-        or native_text.count("\ufffd") > max(10, len(native_text) * 0.05)
+        or bool(quality)
         or (body_chars < 80 and len(page.get_drawings()) > 80)
     )
     text, words = native_text, native_words
     method, error = "native", None
-    if needs_ocr:
+    if recognize and (needs_ocr or force_ocr):
         try:
             textpage = page.get_textpage_ocr(
-                language="por+eng", dpi=200, full=True, tessdata=str(tessdata)
+                language="por+eng", dpi=dpi, full=True, tessdata=str(tessdata)
             )
             text = page.get_text(textpage=textpage, sort=True)
             words = page.get_text("words", textpage=textpage, sort=True)
@@ -151,9 +172,13 @@ def page_inventory(page, tessdata: Path) -> dict:
         "image_fraction": round(image_fraction, 4),
         "image_rects": [list(rect) for rect in image_rects],
         "text_method": method,
+        "needs_ocr": needs_ocr,
+        "ocr_dpi": dpi if method == "ocr" else None,
+        "text_quality": text_quality(text, words, source_bounds.height),
+        "native_quality": quality,
         "ocr_error": error,
         "text": text,
-        "native_text": native_text if needs_ocr else None,
+        "native_text": native_text if needs_ocr or force_ocr else None,
         "words": [list(word) for word in words],
         "evidence": contract_evidence(text),
         "heading_evidence": contract_evidence(text[:1600]),
