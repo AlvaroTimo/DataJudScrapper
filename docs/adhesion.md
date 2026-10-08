@@ -47,12 +47,45 @@ datajud-adhesion reference
 
 El inventario de texto/OCR anterior se reutiliza únicamente si coincide con el original,
 las versiones de extracción y la configuración OCR. No se reutilizan decisiones ni
-máscaras antiguas. El uso selectivo y la reutilización de OCR siguen el principio descrito
+máscaras antiguas. Si un inventario antiguo no registra hashes de modelos y versión de
+runtime OCR compatibles, se vuelve a reconocer la página. El uso selectivo y la reutilización
+de OCR siguen el principio descrito
 en la [documentación de PyMuPDF](https://pymupdf.readthedocs.io/en/latest/recipes-ocr.html).
-La búsqueda combina adhesión, tarjeta y estructura; los títulos de
-anexos son pistas. Las imágenes de candidatos se clasifican localmente. La continuidad
-usa títulos, paginación y cambio de instrumento, con reglas para familias BMG, PAN,
-Daycoval y Cencosud y clasificación visual para otros diseños.
+La versión `complete_card_adhesion_index_v2` sigue este flujo:
+
+1. Lee marcadores y enlaces del índice, convierte sus destinos en páginas físicas y
+   comprueba que los rangos cubran el PDF sin huecos ni solapamientos. Si el índice falta
+   o es inconsistente, busca por contenido en todo el documento.
+2. Prioriza anexos por títulos normalizados, aliases y contexto del banco. Examina también
+   las dos primeras páginas de cada anexo para descubrir formularios con nombres opacos.
+   Una pista en el índice propone candidatos; no confirma un contrato.
+3. Clasifica visualmente las páginas candidatas y delimita cada instrumento por su
+   contenido. Un anexo judicial puede contener varios contratos y documentos ajenos.
+   Las cláusulas que mencionan CCB no equivalen a un título de CCB independiente.
+4. Verifica cierres sospechosos y continuaciones. Firmas y contadores son evidencia,
+   pero no fijan por sí solos el final; pueden seguir beneficios integrantes, incluso
+   con contadores 5/4 y 6/4. Cruzar entre anexos exige confirmación visual explícita.
+5. Busca en el contenido residual aunque ya haya encontrado un contrato, sin volver a
+   clasificar las mismas páginas. Así puede encontrar otra adhesión o copia en un anexo
+   que no se seleccionó inicialmente.
+6. Valida por separado la primera y última página. Distingue instrumentos personalizados
+   y plantillas completas. Conserva las ubicaciones de las copias y envía las dudas a
+   revisión; una respuesta incompleta o inválida no constituye un negativo.
+
+Para reproducciones completas o páginas compartidas con documentos personales, el modelo
+solo puede escoger recortes medidos en el PDF. Se compara el recorte con la página original
+para comprobar que conserva todo el contenido contractual. Sin un recorte seguro, el caso
+queda pendiente. La limpieza y el PDF final usan exactamente ese recorte, con las palabras
+y máscaras trasladadas a sus coordenadas, incluyendo rotación. La revisión muestra la
+página completa, el recorte fuente y la salida limpia.
+
+El inventario se extrae y guarda por página, ligado al hash del original y a la configuración
+de texto/OCR. Primero lee texto nativo; usa OCR a 200 dpi cuando falta texto útil o está
+corrupto y ofrece un reintento a 300 dpi para validar un inicio ambiguo. Un reintento no
+sustituye silenciosamente el texto anterior. El fallback residual puede necesitar OCR de
+muchas páginas en una ejecución sin caché: priorizar el índice no garantiza reducir todo
+el coste de OCR. Los manifiestos registran candidatos primarios/residuales, motivos,
+correcciones de límites, recortes y contadores de lectura/OCR/caché.
 
 La limpieza propone bloques y celdas medidos sobre el documento. El modelo solo puede
 seleccionar regiones existentes. Las reglas intentan proteger cláusulas, opciones contratadas, tasas,
@@ -169,6 +202,30 @@ Cambiar código, reglas o modelos después de congelar la prueba invalida su uso
 prueba nueva. Una iteración posterior requiere otra muestra independiente; la anterior
 queda como regresión y su resultado histórico se conserva.
 
+## Evaluar la versión con índice sin alterar el piloto histórico
+
+`--workspace` selecciona una cohorte aislada para todos los comandos; el valor por defecto
+sigue siendo `adhesion-v1`. Una cohorte nueva reutiliza el backup ya preparado del mismo
+lote y no vuelve a mover los resultados históricos. La preparación excluye las selecciones
+y ejecuciones previas, además de los manifiestos de exposición indicados explícitamente.
+Los manifiestos de exclusión quedan ligados por hash y deben conservarse para reanudar.
+
+```bash
+datajud-adhesion --workspace adhesion-index-v2 prepare \
+  --batch 77248dcf-90a5-427a-bbea-4ba6c14e502c --seed 20261008 \
+  --exclude-manifest /ruta/conservada/selection-50.json \
+  --exclude-manifest /ruta/conservada/selection-extra10.json
+datajud-adhesion --workspace adhesion-index-v2 run \
+  --manifest data/adhesion-index-v2/development.json
+datajud-adhesion --workspace adhesion-index-v2 freeze
+datajud-adhesion --workspace adhesion-index-v2 reference
+```
+
+Después se registra la adjudicación fuente, se ejecuta y revisa el holdout de esa cohorte y
+se evalúa con los mismos comandos anteriores, añadiendo `--workspace adhesion-index-v2`.
+La configuración nueva no puede reutilizar la congelación del primer piloto ni habilita
+por sí sola la ejecución del corpus completo.
+
 ## Pruebas
 
 ```bash
@@ -181,3 +238,14 @@ Se conservan pruebas de píxeles, ausencia de capas ocultas, rotación, OCR e í
 Las nuevas pruebas cubren separación de muestras, límites de instrumentos, bloques mixtos,
 datos económicos, integridad del backup, restauración y reanudación. Los ejemplos de
 prueba son sintéticos; los documentos reales permanecen fuera de Git.
+También se verifican fallback después de un primer éxito, índices ausentes/inconsistentes,
+enlaces sin marcadores, límites entre anexos, contadores inconsistentes, plantillas,
+coordenadas de recortes y máscaras con rotación, caché por página y aislamiento de cohortes.
+
+La regresión de selección sobre los 50 PDF analizados y los 10 adicionales cubrió las
+35 y 5 ocurrencias de referencia, respectivamente. Es cobertura de candidatos sobre
+casos ya explorados, no precisión de extracción ni evaluación de anonimización. Una prueba
+local adicional de cinco anexos previamente explorados recuperó los cinco rangos esperados,
+incluidos los beneficios de BMG y el recorte de un formulario que comparte página con una
+identidad. Persisten ambigüedades en otros documentos del anexo BMG; quedan en revisión.
+Estos ensayos no sustituyen un piloto independiente de fuentes completas.
