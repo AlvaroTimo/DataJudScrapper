@@ -35,27 +35,23 @@ Contar las variantes por separado elevaría el denominador a 13 y daría una cob
 de 0.0 %; no cambiaría la conclusión de fallo. Los pocos positivos y los
 diseños repetidos limitan cualquier generalización por emisor.
 
-El backup verificado conserva 10.838 archivos anteriores y una copia consistente de
-SQLite en `data/backups/20260920T205604Z`. No se eliminaron originales: 908 disponibles y
-92 ausentes desde el flujo anterior, pendientes de recuperación.
+Durante el piloto, un backup verificado conservó 10.838 archivos anteriores y una copia
+consistente de SQLite. En ese momento había 908 originales disponibles y 92 ausentes
+desde el flujo anterior, pendientes de recuperación.
 
 La auditoría comprobó que el extractor y la referencia permanecieron sin cambios, los
 originales del piloto conservaron su hash y cada PDF contiene solo imágenes a 300 dpi,
 sin capas ni estructuras ocultas del original. Eso no subsana los defectos visibles.
 Se aprobaron 160 pruebas; Ruff y la comprobación de dependencias bloqueadas pasaron.
 
-Los artefactos reales permanecen fuera de Git:
+El 8 de octubre de 2026 se eliminaron, a petición del usuario, los artefactos privados de
+`data/adhesion-v1/`, los backups anteriores y los informes y logs de los lotes completados.
+Los originales disponibles y el catálogo operativo de SQLite se conservaron. Este
+documento mantiene el resumen del piloto; sus informes detallados, selecciones y PDF de
+evaluación ya no están disponibles en esas carpetas.
 
-- [Informe por proceso](../data/adhesion-v1/report.md).
-- [Diagnóstico y limitaciones](../data/adhesion-v1/pilot-analysis.md).
-- [Índice de todos los PDF y defectos](../data/adhesion-v1/pilot-artifacts.md).
-- [Índice de salidas útiles según la revisión](../data/adhesion-v1/usable-pilot-outputs.json).
-- [Métricas estructuradas](../data/adhesion-v1/evaluation.json).
-- [Auditoría final](../data/adhesion-v1/final-evidence-integrity.json).
-- [Decisión de no ampliar al lote](../data/adhesion-v1/full-corpus-decision.json).
-
-Los PDF aceptados automáticamente que fallaron la revisión siguen conservados como
-evidencia. No se repararon manualmente ni se sustituyeron casos. Una versión posterior
-debe conservar este resultado como regresión y usar otra muestra independiente.
+Durante el piloto no se repararon manualmente las salidas ni se sustituyeron casos.
+Una versión posterior requiere una nueva evaluación independiente; este resumen no
+permite reproducir la revisión ni recuperar sus artefactos eliminados.
 
 Configuración congelada: `c23a6cdf33a1bee4f65bb2529b587b00b7fee1f5a37c533960f3561b7c6234ba`.

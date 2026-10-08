@@ -76,7 +76,12 @@ documentos reservados mantienen sus controles de selección y congelación.
 El piloto terminó los 25 procesos: cobertura útil 0.0 % (0/12) y fiabilidad de entregados 0.0 % (0/6). **No alcanzó el 80 % y no se amplió al lote.**
 Los fallos incluyen residuos visibles y eliminación de contenido que debía conservarse.
 La integridad de los PDF y las pruebas de software no demuestran calidad contractual.
-Consulte el [resultado, evidencia y limitaciones de referencia](adhesion-pilot-20260920.md).
+Consulte el [resultado y limitaciones de referencia](adhesion-pilot-20260920.md).
+
+El 8 de octubre de 2026 se eliminaron los artefactos históricos de evaluación y los
+backups, informes y logs anteriores, conservando los PDF originales disponibles y el
+catálogo operativo. Los comandos de evaluación siguientes requieren preparar una nueva
+cohorte; las selecciones y la evidencia detallada del piloto anterior ya no están disponibles.
 
 ## Preparación y backup
 
@@ -92,11 +97,12 @@ SHA-256, un diario reanudable y una copia consistente de SQLite. Los originales 
 catálogo de descargas permanecen en su lugar. El scraper puede resolver los contratos
 archivados de los originales previamente descartados.
 
-La preparación inicial identifica 1.000 procesos del lote: 908 originales disponibles y
-92 pendientes de recuperación. Congela 25 procesos mediante muestreo uniforme sin
-reemplazo, semilla 20260920, excluyendo toda exposición previa registrada. Otros 30
-procesos, semilla 20260921, forman el conjunto de desarrollo. También están disponibles
-los ejemplos ya explorados. Los archivos de selección no se reemplazan por casos fáciles.
+La preparación inicial del piloto identificó 1.000 procesos del lote: 908 originales
+disponibles y 92 pendientes de recuperación. Congeló 25 procesos mediante muestreo
+uniforme sin reemplazo, semilla 20260920, excluyendo la exposición previa registrada.
+Otros 30 procesos, semilla 20260921, formaron el conjunto de desarrollo. Una preparación
+nueva calcula la disponibilidad sobre el catálogo actual. Los archivos de selección no
+se reemplazan por casos fáciles.
 
 `datajud-adhesion restore-backup <carpeta>` revierte los movimientos sin sobrescribir
 directorios activos ni sustituir el catálogo vivo por la copia histórica de SQLite.
@@ -179,14 +185,14 @@ Una duda inicial solo se resuelve si los controles finales independientes son co
 esa resolución queda registrada. Los resultados inciertos van a `quarantine`, separados de
 `accepted`.
 
-El estado está en `data/adhesion-v1/state.sqlite3`. Las ejecuciones tienen huellas del
-código, modelos y configuración; se reanudan por documento/página sin reutilizar resultados
-de otra versión. Los estados terminales son `completed`, `no_target`, `needs_review` y
+Cada cohorte preparada guarda su estado en `data/<workspace>/state.sqlite3`. Las ejecuciones
+tienen huellas del código, modelos y configuración; se reanudan por documento/página sin
+reutilizar resultados de otra versión. Los estados terminales son `completed`, `no_target`, `needs_review` y
 `error`; `running` representa una ejecución en curso. Los manifiestos no incluyen valores
 personales; OCR, regiones y cachés de inferencia son datos privados de trabajo.
 
-Las salidas del piloto y del lote están en
-`data/adhesion-v1/outputs/<configuración>/accepted/` o `quarantine/`. Los ensayos de
+Las salidas de evaluación se generan en
+`data/<workspace>/outputs/<configuración>/accepted/` o `quarantine/`. Los ensayos de
 desarrollo se separan en `development-outputs/<configuración>/`. Para localizar una
 salida, usar su manifiesto y su hash; una aprobación de desarrollo no valida el piloto.
 
@@ -210,17 +216,15 @@ antes de registrar `gold.json`. No puede modificarse la referencia después de e
 predicciones de esa muestra.
 
 En el piloto del 20 de septiembre de 2026, las etiquetas del primer revisor visual
-confundieron páginas judiciales con adhesiones. Se conservaron esas observaciones y se
-interrumpió ese pase. La referencia usa descripciones visuales independientes de cada
+confundieron páginas judiciales con adhesiones y se interrumpió ese pase. La referencia
+se construyó con descripciones visuales independientes de cada
 página, una imagen por consulta, con el mismo checkpoint de revisión, seguidas de
-adjudicación de los posibles instrumentos sobre las imágenes originales. La sustitución del procedimiento de referencia
-queda documentada en `data/adhesion-v1/reference-adjudication-protocol.json`; no modifica
-el extractor congelado. Los prompts, herramientas auxiliares, respuestas e imágenes con
-hash se conservan en ese espacio privado. Las páginas vistas directamente por Codex se
-enumeran por separado de las observadas por el modelo local.
-Las primeras descripciones por grupos también se conservaron como evidencia descartada:
-se repitió la observación individual de todas las páginas al detectar desplazamientos entre
-imágenes del mismo grupo. Estas correcciones pertenecen a la referencia, antes del piloto.
+adjudicación de los posibles instrumentos sobre las imágenes originales. Ese cambio
+no modificó el extractor congelado. También se repitió la observación individual de todas
+las páginas al detectar desplazamientos entre imágenes de un mismo grupo. Estas
+correcciones pertenecieron a la referencia, antes del piloto. Los registros detallados
+se retiraron en la limpieza de históricos; sus limitaciones se resumen en el
+[informe del piloto](adhesion-pilot-20260920.md).
 
 ```bash
 datajud-adhesion record-source referencia.json
@@ -267,12 +271,14 @@ Cambiar código, reglas o modelos después de congelar la prueba invalida su uso
 prueba nueva. Una iteración posterior requiere otra muestra independiente; la anterior
 queda como regresión y su resultado histórico se conserva.
 
-## Evaluar la versión con índice sin alterar el piloto histórico
+## Evaluar la versión con índice en una cohorte aislada
 
 `--workspace` selecciona una cohorte aislada para todos los comandos; el valor por defecto
-sigue siendo `adhesion-v1`. Una cohorte nueva reutiliza el backup ya preparado del mismo
-lote y no vuelve a mover los resultados históricos. La preparación excluye las selecciones
-y ejecuciones previas, además de los manifiestos de exposición indicados explícitamente.
+sigue siendo `adhesion-v1`. Si existe una preparación compatible del mismo lote, una
+cohorte nueva reutiliza su backup; en caso contrario, crea uno nuevo. La preparación
+excluye las selecciones y ejecuciones previas que sigan disponibles, además de los
+identificadores documentados y los manifiestos de exposición indicados explícitamente.
+Los registros eliminados en la limpieza no pueden utilizarse como exclusiones.
 Los manifiestos de exclusión quedan ligados por hash y deben conservarse para reanudar.
 
 ```bash
