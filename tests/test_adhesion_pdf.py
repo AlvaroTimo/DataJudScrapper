@@ -5,7 +5,6 @@ import hashlib
 import pytest
 
 from datajud_scraper.adhesion.pdf import (
-    identifier_proposals,
     pixel_box,
     redact_pixels,
     region_rotation,
@@ -123,15 +122,3 @@ def test_clean_pdf_contains_only_cropped_redacted_pixels_and_no_source_objects(t
     )
     with pytest.raises(ValueError, match="ya existe"):
         write_cleaned_contract(source, output, regions, masks, dpi=180)
-
-
-def test_identifier_proposals_are_unconfirmed_and_do_not_store_personal_values():
-    words = [
-        (10, 20, 30, 30, "CPF:"),
-        (35, 20, 85, 30, "123.456.789-00"),
-        (10, 50, 95, 60, "person@example.com"),
-    ]
-    proposals = identifier_proposals(words, 100, 100)
-    assert {p["category"] for p in proposals} >= {"cpf", "email"}
-    assert all(p["confirmed"] is False for p in proposals)
-    assert "123.456" not in str(proposals) and "person@example.com" not in str(proposals)

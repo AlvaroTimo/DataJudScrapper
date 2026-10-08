@@ -9,8 +9,6 @@ from .detection import ADHESION, CARD
 from .inventory import body_text
 from .text import normalize
 
-ROUTING_VERSION = "index-content-v1"
-
 
 def normalize_title(title):
     title = re.sub(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", title)

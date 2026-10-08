@@ -23,16 +23,6 @@ def utc_now() -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
-class StoredCase:
-    case_id: str
-    process_number: str
-    process_number_digits: str
-    distribution_at: datetime | None
-    subject: str | None
-    is_secret: bool | None
-
-
-@dataclass(frozen=True, slots=True)
 class StoredCaseDocument:
     case_id: str
     process_number: str
@@ -465,10 +455,6 @@ class Database:
         )
         self.connection.commit()
 
-    def attach_case(self, run_id: str, case_id: str) -> None:
-        self.connection.execute("UPDATE runs SET case_id = ? WHERE run_id = ?", (case_id, run_id))
-        self.connection.commit()
-
     def finish_run(
         self,
         run_id: str,
@@ -578,46 +564,6 @@ class Database:
                 ),
             )
         return case_id
-
-    def find_latest_valid_by_url(self, source_url: str) -> StoredCaseDocument | None:
-        row = self.connection.execute(
-            """
-            SELECT c.case_id, c.process_number, c.process_number_digits, c.distribution_at,
-                   c.subject, c.is_secret, d.document_id, d.retrieved_at, d.relative_path,
-                   d.sha256, d.size_bytes, d.page_count
-            FROM cases c
-            JOIN case_sources s ON s.case_id = c.case_id
-            JOIN documents d ON d.case_id = c.case_id AND d.validation_status = 'valid'
-            WHERE s.source_url = ?
-            ORDER BY d.retrieved_at DESC
-            LIMIT 1
-            """,
-            (source_url,),
-        ).fetchone()
-        return self._stored_document(row) if row else None
-
-    def find_case_by_url(self, source_url: str) -> StoredCase | None:
-        row = self.connection.execute(
-            """
-            SELECT c.case_id, c.process_number, c.process_number_digits, c.distribution_at,
-                   c.subject, c.is_secret
-            FROM cases c
-            JOIN case_sources s ON s.case_id = c.case_id
-            WHERE s.source_url = ?
-            LIMIT 1
-            """,
-            (source_url,),
-        ).fetchone()
-        if row is None:
-            return None
-        return StoredCase(
-            case_id=row["case_id"],
-            process_number=row["process_number"],
-            process_number_digits=row["process_number_digits"],
-            distribution_at=self._optional_datetime(row["distribution_at"]),
-            subject=row["subject"],
-            is_secret=self._optional_bool(row["is_secret"]),
-        )
 
     def find_latest_valid_by_case_id(self, case_id: str) -> StoredCaseDocument | None:
         row = self.connection.execute(
@@ -741,20 +687,6 @@ class Database:
             "SELECT blocked_until FROM access_state WHERE singleton = 1"
         ).fetchone()
         return row["blocked_until"] if row else None
-
-    def activate_access_cooldown(self, now_timestamp: float, blocked_until: float) -> None:
-        current = self.get_access_blocked_until()
-        if current is not None and current > now_timestamp:
-            return
-        self.connection.execute(
-            """
-            UPDATE access_state
-            SET blocked_until = ?, reason = 'access_challenge'
-            WHERE singleton = 1
-            """,
-            (blocked_until,),
-        )
-        self.connection.commit()
 
     @staticmethod
     def _stored_document(row: sqlite3.Row) -> StoredCaseDocument:

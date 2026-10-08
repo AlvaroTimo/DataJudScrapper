@@ -3,7 +3,7 @@
 Rectangles are normalized coordinates in the displayed page / cropped contract page.
 A new image-only PDF avoids carrying hidden source text, cropped-out content, attachment
 streams, forms, links, annotations, or incremental revisions into a released artifact.
-All mask decisions still require visual review; regex proposals are never approvals.
+All mask decisions still require visual review.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ import io
 import json
 import math
 import os
-import re
 import uuid
 from pathlib import Path
 
@@ -269,44 +268,3 @@ def write_cleaned_contract(
         }
     finally:
         temporary.unlink(missing_ok=True)
-
-
-IDENTIFIER_PATTERNS = {
-    "cpf": re.compile(r"(?<!\d)\d{3}[.\s]?\d{3}[.\s]?\d{3}[-\s]?\d{2}(?!\d)"),
-    "email": re.compile(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}"),
-    "phone": re.compile(r"(?<!\d)(?:\+?55\s*)?\(?\d{2}\)?\s*9?\d{4}[-\s]\d{4}(?!\d)"),
-    "process_number": re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b"),
-}
-
-
-def identifier_proposals(words: list, width: float, height: float) -> list[dict]:
-    """High-recall unconfirmed boxes; excludes literal PII from the returned metadata."""
-    text_parts, offsets = [], []
-    cursor = 0
-    for word in words:
-        value = word[4]
-        text_parts.append(value)
-        offsets.append((cursor, cursor + len(value), word))
-        cursor += len(value) + 1
-    text = " ".join(text_parts)
-    proposals = []
-    for category, pattern in IDENTIFIER_PATTERNS.items():
-        for match in pattern.finditer(text):
-            matched = [
-                word for start, end, word in offsets if end > match.start() and start < match.end()
-            ]
-            if not matched:
-                continue
-            proposals.append(
-                {
-                    "category": category,
-                    "confirmed": False,
-                    "rect": [
-                        max(0, min(w[0] for w in matched) / width),
-                        max(0, min(w[1] for w in matched) / height),
-                        min(1, max(w[2] for w in matched) / width),
-                        min(1, max(w[3] for w in matched) / height),
-                    ],
-                }
-            )
-    return proposals

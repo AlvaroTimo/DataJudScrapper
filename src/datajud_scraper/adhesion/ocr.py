@@ -34,50 +34,6 @@ NEURAL_MODELS = {
 }
 
 
-def transform_layout_words(words, region):
-    """Place normalized words and their glyphs inside a normalized parent region."""
-
-    def transform(box):
-        return [
-            region[0] + box[0] * (region[2] - region[0]),
-            region[1] + box[1] * (region[3] - region[1]),
-            region[0] + box[2] * (region[2] - region[0]),
-            region[1] + box[3] * (region[3] - region[1]),
-        ]
-
-    result = []
-    for word in words:
-        item = [*transform(word[:4]), word[4]]
-        if len(word) > 5 and isinstance(word[5], dict) and word[5].get("glyphs"):
-            item.append({**word[5], "glyphs": [transform(g) for g in word[5]["glyphs"]]})
-        result.append(item)
-    return result
-
-
-def merge_reading_words(primary, supplemental):
-    """Insert missing OCR words without reordering already resolved slanted lines."""
-    words = list(primary)
-    for word in supplemental:
-        area = (word[2] - word[0]) * (word[3] - word[1])
-        if any(
-            max(0, min(w[2], word[2]) - max(w[0], word[0]))
-            * max(0, min(w[3], word[3]) - max(w[1], word[1]))
-            > 0.5 * area
-            for w in words
-        ):
-            continue
-        center = (word[1] + word[3]) / 2
-        position = len(words)
-        for i, current in enumerate(words):
-            distance = (current[1] + current[3]) / 2 - center
-            tolerance = 0.6 * min(word[3] - word[1], current[3] - current[1])
-            if distance > tolerance or abs(distance) <= tolerance and current[0] > word[0]:
-                position = i
-                break
-        words.insert(position, word)
-    return words
-
-
 def neural_configuration():
     return {
         "engine": "rapidocr",
