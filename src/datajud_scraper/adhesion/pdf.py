@@ -123,7 +123,7 @@ def region_inventory(page, region, geometry):
     images = [box for word in words_normalized(image_page) if (box := mapped(word[:4]))]
     text = " ".join(w[4] for w in words)
     return {
-        **page,
+        **{k: v for k, v in page.items() if k not in ("_normalized_body", "_normalized_heading")},
         "width": output_width,
         "height": output_height,
         "rotation": 0,
@@ -188,14 +188,14 @@ def write_cleaned_contract(
     try:
         with pymupdf.open(source_path) as source, pymupdf.open() as result:
             for number, region in enumerate(regions, 1):
-                original = render_contract_page(
-                    source, region, dpi=dpi, raster_source=raster_source
+                original, geometry = render_contract_page(
+                    source, region, dpi=dpi, raster_source=raster_source, with_geometry=True
                 )
                 cleaned, boxes = redact_pixels(
                     original, masks_by_page.get(number, []), decision_mode=decision_mode
                 )
                 buffer = io.BytesIO()
-                cleaned.save(buffer, format="PNG")
+                cleaned.save(buffer, format="PNG", compress_level=1)
                 page = result.new_page(
                     width=cleaned.width * 72 / dpi, height=cleaned.height * 72 / dpi
                 )
@@ -206,6 +206,7 @@ def write_cleaned_contract(
                         "source_page": region["page"],
                         "source_region": region.get("rect", [0, 0, 1, 1]),
                         "source_rotation": region_rotation(region),
+                        "geometry": geometry,
                         "width_pixels": original.width,
                         "height_pixels": original.height,
                         "original_pixels_sha256": hashlib.sha256(original.tobytes()).hexdigest(),

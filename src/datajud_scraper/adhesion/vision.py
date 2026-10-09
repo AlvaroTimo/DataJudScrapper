@@ -61,7 +61,7 @@ def image_bytes(image, long_side=1450):
     image = image.copy()
     image.thumbnail((long_side, long_side))
     out = io.BytesIO()
-    image.save(out, format="PNG")
+    image.save(out, format="PNG", compress_level=1)
     return out.getvalue()
 
 

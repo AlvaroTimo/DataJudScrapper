@@ -123,11 +123,46 @@ def text_quality(text, words, height):
     return reasons
 
 
-def page_inventory(page, tessdata: Path, *, recognize=True, force_ocr=False, dpi=200) -> dict:
+def recognize_inventory(page, native, tessdata, *, dpi=200):
+    """Add OCR to an already parsed native page, without repeating native extraction."""
+    result = dict(native)
+    try:
+        textpage = page.get_textpage_ocr(
+            language="por+eng", dpi=dpi, full=True, tessdata=str(tessdata)
+        )
+        text = textpage.extractText(sort=True)
+        words = page.get_text("words", textpage=textpage, sort=True)
+        height = (page.rect * page.derotation_matrix).height
+        result.update(
+            text=text,
+            words=[list(w) for w in words],
+            text_chars=len(text),
+            text_method="ocr",
+            ocr_error=None,
+            ocr_dpi=dpi,
+            native_text=native.get("native_text") or native["text"],
+            text_quality=text_quality(text, words, height),
+            evidence=contract_evidence(text),
+            heading_evidence=contract_evidence(text[:1600]),
+        )
+    except RuntimeError as exc:
+        result.update(text_method="ocr_failed", ocr_error=str(exc)[:250])
+    return result
+
+
+def page_inventory(
+    page, tessdata: Path, *, recognize=True, force_ocr=False, dpi=200, native=None
+) -> dict:
     import pymupdf
 
-    native_words = page.get_text("words", sort=True)
-    native_text = page.get_text(sort=True)
+    if native is not None:
+        return recognize_inventory(page, native, tessdata, dpi=dpi)
+
+    # One MuPDF parse, rather than parsing twice and rebuilding sorted text in Python.
+    # Detection uses positioned words; block-sorted text is only neutral inventory data.
+    native_page = page.get_textpage(flags=pymupdf.TEXTFLAGS_WORDS)
+    native_words = page.get_text("words", textpage=native_page, sort=True)
+    native_text = native_page.extractText(sort=True)
     source_bounds = page.rect * page.derotation_matrix
     body = [word for word in native_words if word[1] < source_bounds.height * 0.94]
     body_chars = sum(len(word[4]) for word in body)
@@ -150,36 +185,29 @@ def page_inventory(page, tessdata: Path, *, recognize=True, force_ocr=False, dpi
         or bool(quality)
         or (body_chars < 80 and len(page.get_drawings()) > 80)
     )
-    text, words = native_text, native_words
-    method, error = "native", None
-    if recognize and (needs_ocr or force_ocr):
-        try:
-            textpage = page.get_textpage_ocr(
-                language="por+eng", dpi=dpi, full=True, tessdata=str(tessdata)
-            )
-            text = page.get_text(textpage=textpage, sort=True)
-            words = page.get_text("words", textpage=textpage, sort=True)
-            method = "ocr"
-        except RuntimeError as exc:
-            method, error = "ocr_failed", str(exc)[:250]
-    return {
+    result = {
         "page_number": page.number + 1,
         "width": page.rect.width,
         "height": page.rect.height,
         "rotation": page.rotation,
         "native_chars": len(native_text),
-        "text_chars": len(text),
+        "text_chars": len(native_text),
         "image_fraction": round(image_fraction, 4),
         "image_rects": [list(rect) for rect in image_rects],
-        "text_method": method,
+        "text_method": "native",
         "needs_ocr": needs_ocr,
-        "ocr_dpi": dpi if method == "ocr" else None,
-        "text_quality": text_quality(text, words, source_bounds.height),
+        "ocr_dpi": None,
+        "text_quality": quality,
         "native_quality": quality,
-        "ocr_error": error,
-        "text": text,
+        "ocr_error": None,
+        "text": native_text,
         "native_text": native_text if needs_ocr or force_ocr else None,
-        "words": [list(word) for word in words],
-        "evidence": contract_evidence(text),
-        "heading_evidence": contract_evidence(text[:1600]),
+        "words": [list(word) for word in native_words],
+        "evidence": contract_evidence(native_text),
+        "heading_evidence": contract_evidence(native_text[:1600]),
     }
+    return (
+        recognize_inventory(page, result, tessdata, dpi=dpi)
+        if (recognize and (needs_ocr or force_ocr))
+        else result
+    )

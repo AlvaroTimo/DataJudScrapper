@@ -27,6 +27,7 @@ def extraction_config(model):
         "detection",
         "common",
         "local_model",
+        "resources",
     )
     return {
         "phase": "extraction-v1",
@@ -37,6 +38,7 @@ def extraction_config(model):
         "model": model.model,
         "model_digest": model.digest,
         "runtime": model.runtime,
+        "inference": getattr(model, "options", None),
     }
 
 
@@ -77,6 +79,7 @@ def configuration(model, *, include_privacy=True, include_reference=True):
         "model": model.model,
         "model_digest": model.digest,
         "runtime": model.runtime,
+        "inference": getattr(model, "options", None),
         "tesseract": table_configuration() if include_privacy else None,
         "reference_model": REFERENCE_MODEL,
         "reference_model_digest": installed.get(REFERENCE_MODEL) if include_reference else None,
@@ -110,6 +113,7 @@ def configuration(model, *, include_privacy=True, include_reference=True):
             "model": model.model,
             "model_digest": model.digest,
             "runtime": model.runtime,
+            "inference": getattr(model, "options", None),
             "tesseract": config["tesseract"],
             "neural_ocr": config["neural_ocr"],
             "tesseract_models": config["tesseract_models"],

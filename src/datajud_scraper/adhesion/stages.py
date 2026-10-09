@@ -149,11 +149,13 @@ def extract_document(root, source, model, config, *, role, detector, inventory_f
                             raise ValueError("layout belongs to another extracted PDF")
                     else:
                         layout_pages = []
-                        for region in regions:
+                        for output_number, region in enumerate(regions):
                             page = {**pages[region["page"] - 1], "family": instrument["family"]}
-                            _, geometry = render_contract_page(
-                                pdf, region, dpi=300, with_geometry=True
-                            )
+                            geometry = output["pages"][output_number].get("geometry")
+                            if geometry is None:
+                                _, geometry = render_contract_page(
+                                    pdf, region, dpi=300, with_geometry=True
+                                )
                             layout_pages.append(region_inventory(page, region, geometry))
                         write_json(
                             layout_path, {"pdf_sha256": output["sha256"], "pages": layout_pages}

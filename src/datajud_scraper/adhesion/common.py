@@ -29,16 +29,23 @@ def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf8"))
 
 
-def write_json(path, value):
+def write_json(path, value, *, compact=False, durable=True):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
     with temporary.open("w", encoding="utf8") as out:
         os.chmod(temporary, 0o600)
-        json.dump(value, out, ensure_ascii=False, indent=2)
+        json.dump(
+            value,
+            out,
+            ensure_ascii=False,
+            indent=None if compact else 2,
+            separators=(",", ":") if compact else None,
+        )
         out.write("\n")
         out.flush()
-        os.fsync(out.fileno())
+        if durable:
+            os.fsync(out.fileno())
     temporary.replace(path)
 
 

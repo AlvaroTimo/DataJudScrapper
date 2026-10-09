@@ -16,6 +16,31 @@ import httpx
 DEFAULT_MODEL = "qwen3.5:27b"
 REFERENCE_MODEL = "qwen3-vl:8b-instruct-q8_0"
 PROMPT_VERSION = "card-2026-10-08-index-v3"
+BACKEND_DURATIONS = {
+    "load_seconds": "load_duration",
+    "prompt_seconds": "prompt_eval_duration",
+    "decode_seconds": "eval_duration",
+}
+
+
+def inference_snapshot(model):
+    return {
+        "calls": getattr(model, "calls", 0),
+        "seconds": dict(getattr(model, "backend_seconds", {})),
+        "samples": dict(getattr(model, "backend_samples", {})),
+    }
+
+
+def inference_timings(model, before):
+    """Backend durations for this run; None means Ollama did not report every call."""
+    after = inference_snapshot(model)
+    calls = after["calls"] - before["calls"]
+    return {
+        name: round(after["seconds"].get(name, 0) - before["seconds"].get(name, 0), 4)
+        if after["samples"].get(name, 0) - before["samples"].get(name, 0) == calls
+        else None
+        for name in BACKEND_DURATIONS
+    }
 
 
 def canonical_hash(value) -> str:
@@ -42,6 +67,9 @@ class LocalModel:
         endpoint: str = "http://127.0.0.1:11434",
         model: str = DEFAULT_MODEL,
         timeout: float = 300,
+        context_tokens: int = 32768,
+        output_tokens: int = 2048,
+        progress=None,
     ):
         parsed = urlparse(endpoint)
         try:
@@ -54,19 +82,38 @@ class LocalModel:
             raise ValueError("endpoint local invalido")
         if "cloud" in model.lower():
             raise ValueError("no se admiten modelos cloud para estos documentos")
+        if not 2048 <= context_tokens <= 131072 or not 128 <= output_tokens < context_tokens:
+            raise ValueError("invalid local inference context/output limits")
         self.client = httpx.Client(base_url=endpoint.rstrip("/"), timeout=timeout, trust_env=False)
         self.model = model
+        self.options = {
+            "temperature": 0,
+            "seed": 20260920,
+            "num_ctx": context_tokens,
+            "num_predict": output_tokens,
+        }
+        self.progress = progress
         self.cache = cache
         self.calls = 0
         self.cache_hits = 0
         self.seconds = 0.0
-        response = self.client.get("/api/tags")
-        response.raise_for_status()
-        installed = {m["name"]: m for m in response.json()["models"]}
-        if model not in installed:
-            raise ValueError(f"modelo local no instalado: {model}; ejecutar setup_local_model.py")
-        self.digest = installed[model]["digest"]
-        self.runtime = self.client.get("/api/version").json()["version"]
+        self.backend_seconds = dict.fromkeys(BACKEND_DURATIONS, 0.0)
+        self.backend_samples = dict.fromkeys(BACKEND_DURATIONS, 0)
+        try:
+            response = self.client.get("/api/tags")
+            response.raise_for_status()
+            installed = {m["name"]: m for m in response.json()["models"]}
+            if model not in installed:
+                raise ValueError(
+                    f"modelo local no instalado: {model}; ejecutar setup_local_model.py"
+                )
+            self.digest = installed[model]["digest"]
+            response = self.client.get("/api/version")
+            response.raise_for_status()
+            self.runtime = response.json()["version"]
+        except BaseException:
+            self.client.close()
+            raise
 
     def close(self):
         self.client.close()
@@ -78,6 +125,7 @@ class LocalModel:
                 "version": PROMPT_VERSION,
                 "model": self.digest,
                 "runtime": self.runtime,
+                "options": self.options,
                 "task": task,
                 "system": system,
                 "content": content,
@@ -98,6 +146,15 @@ class LocalModel:
         if image_data:
             message["images"] = image_data
         started = time.monotonic()
+        if self.progress:
+            self.progress(
+                {
+                    "event": "model_started",
+                    "task": task,
+                    "model": self.model,
+                    "image_count": len(images),
+                }
+            )
         response = self.client.post(
             "/api/chat",
             json={
@@ -107,23 +164,41 @@ class LocalModel:
                 "stream": False,
                 "think": False,
                 "keep_alive": "30m",
-                "options": {
-                    "temperature": 0,
-                    "seed": 20260920,
-                    "num_ctx": 32768,
-                    "num_predict": 8192,
-                },
+                "options": self.options,
             },
         )
         response.raise_for_status()
         result = response.json()
         if not result.get("done") or result.get("done_reason") == "length":
             raise ValueError("respuesta del modelo incompleta; no se acepta como ausencia")
-        if result.get("prompt_eval_count", 0) >= 31000:
+        if result.get("prompt_eval_count", 0) >= self.options["num_ctx"] - 256:
             raise ValueError("contexto del modelo saturado; no se acepta una respuesta truncada")
         answer = json.loads(result["message"]["content"])
         self.calls += 1
-        self.seconds += time.monotonic() - started
+        elapsed = time.monotonic() - started
+        self.seconds += elapsed
+        durations = {
+            name: result[key] / 1e9
+            if isinstance(result.get(key), (int, float)) and result[key] >= 0
+            else None
+            for name, key in BACKEND_DURATIONS.items()
+        }
+        for name, value in durations.items():
+            if value is not None:
+                self.backend_seconds[name] += value
+                self.backend_samples[name] += 1
+        if self.progress:
+            self.progress(
+                {
+                    "event": "model_finished",
+                    "task": task,
+                    "model": self.model,
+                    "elapsed_seconds": round(elapsed, 3),
+                    "prompt_tokens": result.get("prompt_eval_count"),
+                    "output_tokens": result.get("eval_count"),
+                    "backend_seconds": durations,
+                }
+            )
         private_json(
             path,
             {
@@ -133,6 +208,8 @@ class LocalModel:
                 "answer": answer,
                 "prompt_tokens": result.get("prompt_eval_count"),
                 "output_tokens": result.get("eval_count"),
+                "elapsed_seconds": elapsed,
+                **durations,
             },
         )
         return answer

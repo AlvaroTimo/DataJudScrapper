@@ -16,6 +16,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 from ..ocr_models import MODEL_ROOT
+from .resources import available_cpus
 
 NEURAL_ROOT = Path.home() / ".local/share/datajud-scraper/rapidocr"
 NEURAL_MODELS = {
@@ -43,8 +44,8 @@ def neural_configuration():
         "models": {Path(path).name: digest for path, digest in NEURAL_MODELS.values()},
         "unclip_ratio": 1.2,
         "max_side_len": 2000,
-        "intra_threads": 8,
-        "inter_threads": 2,
+        "intra_threads": min(8, available_cpus()),
+        "inter_threads": min(2, available_cpus()),
         "word_boxes": "character_aligned_v2",
     }
 
@@ -168,7 +169,7 @@ def sparse_words(image, *, quality="best", segmentation=11):
     if quality not in ("fast", "best") or segmentation not in (3, 6, 11):
         raise ValueError("configuracion OCR invalida")
     buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
+    image.save(buffer, format="PNG", compress_level=1)
     result = subprocess.run(
         [
             binary,

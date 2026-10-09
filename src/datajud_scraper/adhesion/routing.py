@@ -80,6 +80,11 @@ def content_attachments(pages, attachments):
 def plan_candidates(pages, attachments):
     candidates, indexed = content_attachments(pages, attachments)
     groups, evidence, probes = [], [], []
+    if hasattr(pages, "prefetch"):
+        pages.prefetch([
+            n for a in candidates
+            for n in range(a["start_page"], min(a["end_page"], a["start_page"] + 1) + 1)
+        ])
     for a in candidates:
         signals = title_signals(a.get("title", ""))
         firsts = list(range(a["start_page"], min(a["end_page"], a["start_page"] + 1) + 1))
@@ -116,6 +121,11 @@ def candidate_numbers(pages, attachments, *, classified=()):
     candidates, _ = content_attachments(pages, attachments)
     classified = set(classified)
     selected = set()
+    if hasattr(pages, "prefetch"):
+        pages.prefetch([
+            n for a in candidates
+            for n in range(a["start_page"], a["end_page"] + 1) if n not in classified
+        ])
     for a in candidates:
         numbers = range(a["start_page"], a["end_page"] + 1)
         if all(n in classified for n in numbers):
