@@ -73,6 +73,133 @@ inciertos figuran en cuarentena y el lote termina con `processing_needs_review` 
 `completed_with_errors`; no se presentan como salidas listas. La anonimización puede
 reanudarse desde el manifiesto de extracción sin repetir la búsqueda del contrato.
 
+## Rendimiento y equipos con menos recursos
+
+La ejecución reutiliza la sesión HTTP entre expedientes y vuelve a inicializarla si expira.
+La ficha de cada proceso se sigue comprobando antes de descargar. El intervalo HTTP, los
+límites persistentes y las pausas solicitadas por el tribunal siguen aplicándose.
+
+El inventario extrae texto nativo una sola vez por página y ejecuta el OCR por procesos,
+con un PDF independiente en cada proceso. `--ocr-workers 0` selecciona automáticamente
+hasta ocho procesos, limitado por CPU disponible (afinidad y cuota del contenedor), memoria
+libre y tamaño del PDF. Con
+`--ocr-workers 1` se ejecuta en serie. `--ocr-memory-mb` es un presupuesto **estimado para
+seleccionar concurrencia**, no un límite estricto del sistema operativo ni la RAM del modelo.
+El inventario mantiene hasta 64 páginas por caché en memoria; el resto queda en disco.
+Las cachés OCR son compactas, privadas y se publican de forma atómica; los manifiestos y
+las salidas conservan sincronización a disco y verificación de hashes.
+
+La consola muestra lectura/OCR, inferencias y fases. `results.jsonl` incluye `timings`
+(`scraper_seconds`, `contract_seconds`, `total_seconds`) y las métricas de contratos
+separan extracción, anonimización, inferencia y reutilización de resultados.
+`model_backend_seconds` distingue carga de pesos, evaluación de entrada y generación de
+salida según lo informado por Ollama. Un valor `null` indica que faltó esa medida, no que
+el trabajo tardara cero segundos.
+
+Para equipos con GPU de 16 GB, puede instalar un modelo menor y seleccionarlo explícitamente:
+
+```bash
+.venv/bin/python scripts/setup_local_model.py --model qwen3.5:4b
+.venv/bin/datajud-scraper resume <batch-id> \
+  --contract-mode both --contract-retention keep \
+  --local-model qwen3.5:4b --ocr-workers 0 --ocr-memory-mb 1024
+```
+
+También se ensayó `qwen3.5:9b`, instalable con el mismo script. Ollama informó 6,7 GB de
+memoria residente con contexto de 32768 tokens en el host medido; no es una medida de
+VRAM máxima ni una validación en la Quadro objetivo. El expediente dejó un grupo para
+revisión, frente a dos con 27B y diez con 4B. Menos revisiones pendientes no demuestra
+mejor precisión: falta un conjunto de contratos reales etiquetados para compararlos.
+
+El modelo 27B sigue siendo el predeterminado. El 4B permite reducir los recursos necesarios,
+pero requiere evaluar su calidad: en el PDF ensayado dejó diez grupos para revisión frente
+a dos del 27B. Ninguna de esas ejecuciones confirmó un contrato; esa comparación no mide
+precisión ni cobertura de positivos. Cambiar modelo, contexto o límite de salida cambia la
+firma del procesamiento y evita reutilizar decisiones incompatibles. Una respuesta truncada
+o con el contexto saturado se rechaza. El OCR conserva las resoluciones de 200/300 dpi y las
+salidas rasterizadas conservan 300 dpi, sus píxeles y los controles de anonimización.
+
+Mediciones del 9 de octubre de 2026 sobre el expediente de 290 páginas y 40,5 MB:
+
+| Medida | Resultado |
+| --- | ---: |
+| Extracción original, 27B | 228,9 s |
+| Extracción y fase de anonimización, optimizado, 27B y 12 procesos / 4096 MiB | 40,1–59,9 s (ejecución anterior: 52,9 s) |
+| Inventario completo de 290 páginas, 74 con OCR, 12 procesos | 22,9 s |
+| Reutilización del inventario | 0,125 s |
+| Reutilización de fases verificadas, sin preparación del runtime ni validación de fuente | 0,0044 s |
+| Extracción y fase de anonimización, 4B y concurrencia automática | 65,5 s |
+| Extracción y fase de anonimización, 9B y 12 procesos / 4096 MiB | 50,0 s; 50,6 s incluyendo preparación y validación |
+
+El caso ensayado terminó en `needs_review` sin contratos confirmados: la fase de anonimización
+no tuvo páginas que anonimizar. Estos números **no prueban la latencia de anonimizar contratos
+positivos**. Los benchmarks usan espacios temporales independientes del lote y cachés nuevas
+en la primera ejecución; la segunda reutiliza resultados. El sistema operativo puede tener
+los archivos en su caché. El host medido tiene Core Ultra 9 285K, RTX 5090 de 32 GB y 123 GiB
+de RAM, con otros trabajos activos; no es la Quadro RTX 5000 de 16 GB del equipo objetivo.
+El estado en memoria de Ollama no se reinicia: la última ejecución 27B informó 0,13 s de
+carga y 6,17 s de consultas; la primera 9B informó 4,35 s de carga y 13,75 s de consultas.
+Estos ensayos incluyen diferentes estados del runtime y no permiten atribuir la variación
+completa al código ni comparar modelos como si ambos estuvieran recién cargados.
+
+También se completó un contrato sintético positivo de una página, con 27B: extracción
+7,9 s, anonimización 13,6 s, seis consultas al modelo y estado final `completed`. Es una
+prueba funcional con datos ficticios, no una evaluación de precisión sobre contratos reales.
+Una prueba de descarga real, con sesión reutilizada y ambas esperas de cortesía fijadas
+explícitamente a cero, tardó 21,8 s y 15,7 s para los dos primeros expedientes. Una ejecución
+previa del mismo par tardó 18,5 s en total: la red y el servidor varían entre ejecuciones.
+
+Los objetivos de 3 s para descargar y 5 s para extracción y anonimización **no se alcanzaron
+para PDF nuevos escaneados**. El intervalo HTTP predeterminado ya añade varias esperas;
+además, el servidor y el tamaño de los documentos no ofrecen una cota de descarga. Solo el
+OCR del ejemplo supera 5 s. Una caché verificada puede cumplir tiempos mucho menores,
+pero eso no equivale a procesar un documento nuevo. No se omiten páginas ni controles para
+presentar un resultado incompleto como terminado.
+
+Opciones evaluadas y decisiones:
+
+| Opción | Decisión |
+| --- | --- |
+| Parsear texto una vez; reutilizar texto normalizado | Implementado. Se conservaron palabras posicionadas y decisiones OCR en las 290 páginas contrastadas. |
+| Paralelizar OCR | Implementado con procesos aislados, concurrencia por CPU/RAM y terminación al interrumpir. |
+| Hilos con PyMuPDF | Descartado: su documentación no admite acceso concurrente desde hilos. |
+| Cachés compactas y menos sincronizaciones | Implementado para inventarios regenerables; manifiestos y PDF siguen siendo durables. |
+| Evitar renders repetidos; comprimir PNG con menor esfuerzo | Implementado sin pérdida de píxeles, con verificación posterior. |
+| Reutilizar HTTP y cookies | Implementado por lote con recuperación de sesión; se conserva comprobación de secreto por proceso. |
+| Modelos menores y contexto/salida configurables | Implementado como opciones; 4B y 9B ensayados, sin evidencia suficiente para sustituir el 27B predeterminado. |
+| Omitir OCR, búsqueda residual o revisiones visuales | No aplicado: podría omitir contratos o aceptar contenido sin verificar. |
+| Bajar dpi o sustituir el OCR | Requiere comparación independiente de detección, legibilidad y privacidad; no aplicado por defecto. |
+| OCR con CUDA/TensorRT | Posible experimento para equipos con GPU; el runtime instalado solo dispone de OCR ONNX en CPU. No validado en la GPU objetivo. |
+| Modelo entrenado específicamente para estas plantillas | Requiere etiquetas y evaluación independiente; no existe un conjunto validado vigente que permita sustituir el verificador. |
+| Solapar descargas y procesamiento; paralelizar expedientes | Puede mejorar rendimiento de lotes, no garantiza latencia por PDF; requiere coordinar sesiones y límites globales. |
+| Aplazar trabajo o imponer un timeout de 5 s | Limitaría la espera dejando trabajo pendiente; no satisface el requisito de procesamiento completo. |
+| Caché de resultados ya verificados | Implementada y medida; depende de coincidencia de fuente, configuración y artefactos. |
+
+Fuentes técnicas: [multiprocesamiento en PyMuPDF](https://pymupdf.readthedocs.io/en/latest/recipes-multiprocessing.html),
+[concurrencia en Tesseract](https://tesseract-ocr.github.io/tessdoc/FAQ.html#can-i-increase-speed-of-ocr),
+[contexto y memoria de Ollama](https://docs.ollama.com/context-length) y
+[modelo visual Qwen 4B](https://ollama.com/library/qwen3.5:4b),
+[Qwen 9B](https://ollama.com/library/qwen3.5:9b) y
+[duraciones de inferencia Ollama](https://docs.ollama.com/api/chat).
+
+Para reproducir las mediciones sin descargar de nuevo ni alterar el lote:
+
+```bash
+.venv/bin/python scripts/benchmark_pipeline.py \
+  --document-id 55cc4e9c-8fa1-4568-a8da-6687feb4f1c1 \
+  --phase both --model qwen3.5:27b --workers 12 --memory-mb 4096 \
+  --repeat 2 --output data/performance/full-27b.json
+```
+
+`--phase native`, `inventory` y `detect` permiten medir las etapas por separado. El benchmark
+mantiene el catálogo en modo lectura y elimina únicamente su espacio temporal privado.
+`model_metadata_seconds` mide las consultas de versión/modelos instalados, no la carga de
+pesos. `model_backend_seconds.load_seconds` mide la carga informada en las inferencias;
+esas duraciones ya están incluidas en `model_seconds`. `measured_total_seconds` incluye
+preparación, validación de fuente y procesamiento. Las repeticiones no vuelven a preparar
+el runtime. `worker_limit` muestra la concurrencia permitida y `parallel_workers_used`
+los procesos utilizados por el inventario; una reutilización sin procesos informa cero.
+
 ## Piloto y lotes
 
 ```bash
@@ -253,6 +380,11 @@ opciones si había personalizado la consulta o los límites.
 | `--challenge-cooldown-seconds` | `DATAJUD_CHALLENGE_COOLDOWN_SECONDS` | 3600 |
 | `--contract-mode` | `DATAJUD_CONTRACT_MODE` | `both` |
 | `--contract-retention` | `DATAJUD_CONTRACT_RETENTION` | `purge` |
+| `--ocr-workers` | `DATAJUD_OCR_WORKERS` | 0 (automático) |
+| `--ocr-memory-mb` | `DATAJUD_OCR_MEMORY_MB` | 2048 |
+| `--local-model` | `DATAJUD_LOCAL_MODEL` | `qwen3.5:27b` |
+| `--local-context-tokens` | `DATAJUD_LOCAL_CONTEXT_TOKENS` | 32768 |
+| `--local-output-tokens` | `DATAJUD_LOCAL_OUTPUT_TOKENS` | 2048 |
 
 
 Los timeouts de lectura limitan la espera entre bloques recibidos. El tamaño de los archivos
