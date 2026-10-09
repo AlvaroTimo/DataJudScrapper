@@ -65,6 +65,7 @@ class ScrapeResult:
     contract_count: int | None = None
     contract_paths: tuple[Path, ...] = ()
     contract_processing: dict | None = None
+    timings: dict | None = None
 
     def to_dict(self) -> dict[str, object]:
         result = {
@@ -85,6 +86,8 @@ class ScrapeResult:
             result["contract_paths"] = [str(path) for path in self.contract_paths]
         if self.contract_processing is not None:
             result["contract_processing"] = self.contract_processing
+        if self.timings is not None:
+            result["timings"] = self.timings
         return result
 
     def to_json(self) -> str:

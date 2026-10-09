@@ -75,6 +75,13 @@ def test_environment_and_explicit_precedence(tmp_path, monkeypatch) -> None:
         ("BOOTSTRAP_URL", "https://example.com/session"),
         ("CONTRACT_MODE", "anonymize"),
         ("CONTRACT_RETENTION", "invalid"),
+        ("OCR_WORKERS", "-1"),
+        ("OCR_MEMORY_MB", "0"),
+        ("LOCAL_MODEL", ""),
+        ("LOCAL_MODEL", "remote-cloud:4b"),
+        ("LOCAL_CONTEXT_TOKENS", "1024"),
+        ("LOCAL_OUTPUT_TOKENS", "64"),
+        ("LOCAL_OUTPUT_TOKENS", "32768"),
     ],
 )
 def test_invalid_configuration_fails_before_storage_or_network(

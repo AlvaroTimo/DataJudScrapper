@@ -86,8 +86,16 @@ class ScraperService:
         self.paths.initialize()
         self.logger = EventLogger(self.paths, self.config)
         self._contract_processor = None
+        self.progress = None
+        self._processing_seconds = 0.0
+        self._client = None
+        self._session_ready = False
 
     def close(self):
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+            self._session_ready = False
         if self._contract_processor is not None:
             self._contract_processor.close()
 
@@ -98,14 +106,24 @@ class ScraperService:
             from .contract_processing import ContractProcessor
 
             self._contract_processor = ContractProcessor(self.config, self.logger)
-        self._contract_processor.prepare()
+        self._contract_processor.progress = self.progress
+        started = time.monotonic()
+        try:
+            self._contract_processor.prepare()
+        finally:
+            self._processing_seconds += time.monotonic() - started
         return self._contract_processor
 
     def _processed_result(self, stored, result):
         if self.config.contract_mode == "none":
             return result
         try:
-            release = self._prepare_contracts().process(stored)
+            processor = self._prepare_contracts()
+            started = time.monotonic()
+            try:
+                release = processor.process(stored)
+            finally:
+                self._processing_seconds += time.monotonic() - started
         except PauseError:
             raise
         except Exception as exc:
@@ -127,10 +145,30 @@ class ScraperService:
             contract_processing={
                 "download_status": result.status,
                 **{k: release[k] for k in ("mode", "status", "source_retained", "phases")},
+                **(
+                    {"execution_metrics": release["execution_metrics"]}
+                    if "execution_metrics" in release
+                    else {}
+                ),
             },
         )
 
-    def scrape_record(
+    def scrape_record(self, record, database, case_id, run_id, *, refresh=False):
+        started = time.monotonic()
+        before = self._processing_seconds
+        result = self._scrape_record(record, database, case_id, run_id, refresh=refresh)
+        elapsed = time.monotonic() - started
+        processing = self._processing_seconds - before
+        return replace(
+            result,
+            timings={
+                "scraper_seconds": round(max(0.0, elapsed - processing), 3),
+                "contract_seconds": round(processing, 3),
+                "total_seconds": round(elapsed, 3),
+            },
+        )
+
+    def _scrape_record(
         self,
         record: DatasetRecord,
         database: Database,
@@ -157,7 +195,9 @@ class ScraperService:
             raise PauseError("access_cooldown", "cooldown de acceso activo", blocked)
         limiter = PersistentRateLimiter(database, self.config, sleep=self.sleep, jitter=self.jitter)
         budget: Counter = Counter()
-        client = self._new_client()
+        if self._client is None:
+            self._client = self._new_client()
+        client = self._client
         recovered = False
         fallback_used = False
         need_context = True
@@ -169,19 +209,21 @@ class ScraperService:
                 try:
                     if need_context:
                         try:
-                            page = self._fetch_page(
-                                client,
-                                self.config.bootstrap_url,
-                                "bootstrap",
-                                run_id,
-                                database,
-                                limiter,
-                                budget,
-                            )
-                            if b"DadosProcesso?numeroProcesso=" not in page.content:
-                                raise SessionExpiredError(
-                                    "la inicializacion no devolvio una consulta publica"
+                            if not self._session_ready:
+                                page = self._fetch_page(
+                                    client,
+                                    self.config.bootstrap_url,
+                                    "bootstrap",
+                                    run_id,
+                                    database,
+                                    limiter,
+                                    budget,
                                 )
+                                if b"DadosProcesso?numeroProcesso=" not in page.content:
+                                    raise SessionExpiredError(
+                                        "la inicializacion no devolvio una consulta publica"
+                                    )
+                                self._session_ready = True
                         except (FetchError, ParseError) as exc:
                             raise PauseError(
                                 "bootstrap_failed", "fallo persistente de inicializacion"
@@ -271,6 +313,7 @@ class ScraperService:
                     self.logger.emit("session_recovery", run_id=run_id)
                     client.close()
                     client = self._new_client()
+                    self._client, self._session_ready = client, False
                     need_context = True
                 except _RetryableRequest as exc:
                     # Honor server-requested pauses even on the last allowed attempt.
@@ -285,6 +328,7 @@ class ScraperService:
                     database.increment_attempt(run_id, "session")
                     client.close()
                     client = self._new_client()
+                    self._client, self._session_ready = client, False
                     need_context = True
             duplicate = database.find_valid_by_hash(case_id, downloaded.validation.sha256)
             preserved = (
@@ -335,7 +379,6 @@ class ScraperService:
             stored = database.find_valid_by_hash(case_id, downloaded.validation.sha256)
             return self._processed_result(stored, result)
         finally:
-            client.close()
             self.paths.remove_managed_file(temp)
 
     def _fetch_page(self, client, url, phase, run_id, database, limiter, budget, *, data=None):
@@ -521,6 +564,14 @@ class ScraperService:
                     pages=validation.page_count,
                     sha256=validation.sha256,
                 )
+                if self.progress:
+                    self.progress(
+                        {
+                            "event": "pdf_validated",
+                            "pages": validation.page_count,
+                            "bytes": validation.size_bytes,
+                        }
+                    )
                 return DownloadedPdf(
                     temp_path=temp_path,
                     validation=validation,
@@ -570,7 +621,12 @@ class ScraperService:
         )
         if self.config.contract_mode == "both" and release_path.exists():
             try:
-                release = self._prepare_contracts().cached(stored)
+                processor = self._prepare_contracts()
+                started = time.monotonic()
+                try:
+                    release = processor.cached(stored)
+                finally:
+                    self._processing_seconds += time.monotonic() - started
             except PauseError:
                 raise
             except Exception as exc:
@@ -578,7 +634,23 @@ class ScraperService:
             if release and not release["source_retained"]:
                 result = self._result_from_stored(stored, "already_exists", run_id)
                 return self._result_with_processing(
-                    replace(result, status="contracts_preserved"), release
+                    replace(result, status="contracts_preserved"),
+                    {
+                        **release,
+                        "execution_metrics": {
+                            "cache_hit": True,
+                            "extraction_seconds": 0.0,
+                            "anonymization_seconds": 0.0,
+                            "model_calls": 0,
+                            "model_seconds": 0.0,
+                            "model_backend_seconds": {
+                                "load_seconds": 0.0,
+                                "prompt_seconds": 0.0,
+                                "decode_seconds": 0.0,
+                            },
+                            "inventory": {"native_reads": 0, "ocr_pages": 0, "ocr_retries": 0},
+                        },
+                    },
                 )
 
         archived = archived_release(self.paths.root, stored.document_id)

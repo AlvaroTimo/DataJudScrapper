@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import shutil
+import time
 from pathlib import Path
 
 from .adhesion.common import digest, read_json, workspace, workspace_scope, write_json
+from .adhesion.local_model import BACKEND_DURATIONS, inference_snapshot, inference_timings
+from .adhesion.resources import resource_scope
 from .adhesion.stages import load_phase, managed, verified_artifact
 from .errors import PauseError
 from .pdf_validation import hash_file
@@ -30,6 +33,13 @@ class ContractProcessor:
         self.model = None
         self.signature = None
         self.pipeline_config = None
+        self.progress = None
+
+    def _progress(self, event):
+        if self.logger is not None:
+            self.logger.emit(event["event"], **{k: v for k, v in event.items() if k != "event"})
+        if self.progress:
+            self.progress(event)
 
     def prepare(self):
         if self.model is not None:
@@ -53,7 +63,13 @@ class ContractProcessor:
                     ):
                         raise ValueError("privacy OCR language models missing")
                     neural_engine()
-                model = LocalModel(workspace(self.root) / "model-cache" / "preflight")
+                model = LocalModel(
+                    workspace(self.root) / "model-cache" / "preflight",
+                    model=self.config.local_model,
+                    context_tokens=self.config.local_context_tokens,
+                    output_tokens=self.config.local_output_tokens,
+                    progress=self._progress,
+                )
                 try:
                     config = configuration(
                         model,
@@ -71,7 +87,7 @@ class ContractProcessor:
             raise PauseError(
                 "contract_processing_unavailable",
                 "el procesamiento local no esta disponible; instale el extra contracts, "
-                "los modelos OCR y el modelo local antes de descargar, "
+                f"los modelos OCR y el modelo local {self.config.local_model} antes de descargar, "
                 "o seleccione --contract-mode none",
             ) from exc
 
@@ -82,7 +98,14 @@ class ContractProcessor:
 
     def cached(self, stored):
         self.prepare()
-        with workspace_scope(self.root, self.WORKSPACE):
+        with (
+            workspace_scope(self.root, self.WORKSPACE),
+            resource_scope(
+                workers=self.config.ocr_workers,
+                memory_mb=self.config.ocr_memory_mb,
+                progress=self._progress,
+            ),
+        ):
             path = workspace(self.root) / "scraper-releases" / f"{stored.document_id}.json"
             if not path.exists():
                 return None
@@ -127,10 +150,28 @@ class ContractProcessor:
         from .adhesion.pipeline import anonymize_extraction, extract_document
 
         self.prepare()
-        with workspace_scope(self.root, self.WORKSPACE):
+        with (
+            workspace_scope(self.root, self.WORKSPACE),
+            resource_scope(
+                workers=self.config.ocr_workers,
+                memory_mb=self.config.ocr_memory_mb,
+                progress=self._progress,
+            ),
+        ):
             cached = self.cached(stored)
             if cached is not None:
-                return cached
+                return {
+                    **cached,
+                    "execution_metrics": {
+                        "cache_hit": True,
+                        "extraction_seconds": 0.0,
+                        "anonymization_seconds": 0.0,
+                        "model_calls": 0,
+                        "model_seconds": 0.0,
+                        "model_backend_seconds": dict.fromkeys(BACKEND_DURATIONS, 0.0),
+                        "inventory": {"native_reads": 0, "ocr_pages": 0, "ocr_retries": 0},
+                    },
+                }
             source = {
                 "document_id": stored.document_id,
                 "case_id": stored.case_id,
@@ -139,19 +180,32 @@ class ContractProcessor:
                 "page_count": stored.page_count,
             }
             self.model.cache = workspace(self.root) / "model-cache" / stored.document_id
-            self.logger.emit(
-                "contract_phase_started", document_id=stored.document_id, phase="extraction"
+            started = time.monotonic()
+            calls_before = getattr(self.model, "calls", 0)
+            model_seconds_before = getattr(self.model, "seconds", 0)
+            model_timings_before = inference_snapshot(self.model)
+            self._progress(
+                {
+                    "event": "contract_phase_started",
+                    "document_id": stored.document_id,
+                    "phase": "extraction",
+                }
             )
             extraction = extract_document(
                 self.root, source, self.model, self.pipeline_config, role="scraper"
             )
-            self.logger.emit(
-                "contract_phase_finished",
-                document_id=stored.document_id,
-                phase="extraction",
-                status=extraction["status"],
-                manifest_path=extraction["manifest_path"],
+            extraction_seconds = time.monotonic() - started
+            self._progress(
+                {
+                    "event": "contract_phase_finished",
+                    "document_id": stored.document_id,
+                    "phase": "extraction",
+                    "status": extraction["status"],
+                    "manifest_path": extraction["manifest_path"],
+                    "elapsed_seconds": round(extraction_seconds, 3),
+                }
             )
+            anonymization_seconds = 0.0
             result = extraction
             phases = {
                 "extraction": {
@@ -161,8 +215,13 @@ class ContractProcessor:
                 }
             }
             if self.config.contract_mode == "both":
-                self.logger.emit(
-                    "contract_phase_started", document_id=stored.document_id, phase="anonymization"
+                started = time.monotonic()
+                self._progress(
+                    {
+                        "event": "contract_phase_started",
+                        "document_id": stored.document_id,
+                        "phase": "anonymization",
+                    }
                 )
                 result = anonymize_extraction(
                     self.root,
@@ -176,12 +235,16 @@ class ContractProcessor:
                     "manifest_path": result["manifest_path"],
                     "paths": [i["output"]["path"] for i in result["instruments"]],
                 }
-                self.logger.emit(
-                    "contract_phase_finished",
-                    document_id=stored.document_id,
-                    phase="anonymization",
-                    status=result["status"],
-                    manifest_path=result["manifest_path"],
+                anonymization_seconds = time.monotonic() - started
+                self._progress(
+                    {
+                        "event": "contract_phase_finished",
+                        "document_id": stored.document_id,
+                        "phase": "anonymization",
+                        "status": result["status"],
+                        "manifest_path": result["manifest_path"],
+                        "elapsed_seconds": round(anonymization_seconds, 3),
+                    }
                 )
             release = {
                 "document_id": stored.document_id,
@@ -199,6 +262,17 @@ class ContractProcessor:
                     if i["status"] in ("completed", "extracted")
                 ],
                 "extraction_manifest": extraction["manifest_path"],
+                "execution_metrics": {
+                    "cache_hit": False,
+                    "extraction_seconds": round(extraction_seconds, 3),
+                    "anonymization_seconds": round(anonymization_seconds, 3),
+                    "model_calls": getattr(self.model, "calls", 0) - calls_before,
+                    "model_seconds": round(
+                        getattr(self.model, "seconds", 0) - model_seconds_before, 3
+                    ),
+                    "model_backend_seconds": inference_timings(self.model, model_timings_before),
+                    "inventory": extraction.get("inventory_stats", {}),
+                },
             }
             path = workspace(self.root) / "scraper-releases" / f"{stored.document_id}.json"
             write_json(path, release)

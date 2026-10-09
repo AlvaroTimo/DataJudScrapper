@@ -77,6 +77,8 @@ def test_download_and_reimport_are_idempotent(respx_mock, dataset_factory, test_
     assert second["metrics"]["pdf_attempts"] == second["metrics"]["page_attempts"] == 0
     assert boot.call_count == source.call_count == download.call_count == 1
     result = rows(first)[0]  # The resumed report now records the cache hit.
+    assert result["timings"] == result["result"]["timings"]
+    assert result["timings"]["contract_seconds"] == 0
     assert result["original"]["subject"] == "Assunto original"
     assert result["verified"]["subject"].startswith("Indenização")
     assert result["verified"]["projudi_internal_id"] == INTERNAL_ID
@@ -471,6 +473,56 @@ def test_isolated_failure_does_not_replace_or_stop_selected_records(
     assert [r["process_number"] for r in rows(summary)] == [
         r["process_number"] for r in records[:2]
     ]
+
+
+@respx.mock(assert_all_called=False)
+def test_batch_reuses_session_but_checks_secrecy_for_each_case(
+    respx_mock, dataset_factory, test_config
+):
+    records = [numbered_record(i) for i in (1, 2)]
+    boot = respx_mock.get(PUBLIC_URL).respond(
+        200, content=case_html(), headers={"Set-Cookie": "JSESSIONID=shared; Path=/projudi"}
+    )
+    for index, record in enumerate(records):
+
+        def response(request, index=index, record=record):
+            assert request.headers["Cookie"] == "JSESSIONID=shared"
+            return page(
+                cnj=record["process_number"],
+                internal_id=record["projudi_internal_id"],
+                secret="SIM" if index else "NÃO",
+            )
+
+        respx_mock.get(record["source_url"]).mock(side_effect=response)
+    first = respx_mock.get(
+        DOWNLOAD_URL.replace(INTERNAL_ID, records[0]["projudi_internal_id"])
+    ).mock(return_value=pdf(pdf_bytes(records[0]["process_number"])))
+    second = respx_mock.get(
+        DOWNLOAD_URL.replace(INTERNAL_ID, records[1]["projudi_internal_id"])
+    ).mock(return_value=pdf(pdf_bytes(records[1]["process_number"])))
+    summary = BatchService(test_config).start(*dataset_factory(records), limit=2, sample="first")
+    assert summary["counts"] == {"downloaded": 1, "secret_skipped": 1}
+    assert boot.call_count == first.call_count == 1
+    assert second.call_count == 0
+
+
+@respx.mock
+def test_session_expiration_between_records_recovers_once(respx_mock, dataset_factory, test_config):
+    records = [numbered_record(i) for i in (1, 2)]
+    boot = respx_mock.get(PUBLIC_URL).respond(200, content=case_html())
+    for index, record in enumerate(records):
+        response = page(cnj=record["process_number"], internal_id=record["projudi_internal_id"])
+        route = respx_mock.get(record["source_url"])
+        route.mock(
+            side_effect=[httpx.Response(200, content=EXPIRED), response] if index else [response]
+        )
+        respx_mock.get(DOWNLOAD_URL.replace(INTERNAL_ID, record["projudi_internal_id"])).mock(
+            return_value=pdf(pdf_bytes(record["process_number"]))
+        )
+    summary = BatchService(test_config).start(*dataset_factory(records), limit=2, sample="first")
+    assert summary["counts"] == {"downloaded": 2}
+    assert boot.call_count == 2
+    assert summary["metrics"]["session_recoveries"] == 1
 
 
 @pytest.mark.parametrize("interrupt", [False, True])

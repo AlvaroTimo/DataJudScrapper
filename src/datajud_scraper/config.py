@@ -31,6 +31,11 @@ class ScraperConfig:
     challenge_cooldown_seconds: int = 3600
     contract_mode: str = "both"
     contract_retention: str = "purge"
+    ocr_workers: int = 0
+    ocr_memory_mb: int = 2048
+    local_model: str = "qwen3.5:27b"
+    local_context_tokens: int = 32768
+    local_output_tokens: int = 2048
 
     @classmethod
     def from_env(
@@ -80,6 +85,12 @@ class ScraperConfig:
             raise ValueError("contract_mode debe ser both, extract o none")
         if self.contract_retention not in ("keep", "purge"):
             raise ValueError("contract_retention debe ser keep o purge")
+        if not self.local_model.strip() or "cloud" in self.local_model.lower():
+            raise ValueError("local_model debe ser un modelo local no vacio")
+        if not 2048 <= self.local_context_tokens <= 131072:
+            raise ValueError("local_context_tokens debe estar entre 2048 y 131072")
+        if not 128 <= self.local_output_tokens < self.local_context_tokens:
+            raise ValueError("local_output_tokens debe ser >=128 y menor que local_context_tokens")
         if not self.user_agent.strip() or any(
             ord(char) < 32 or ord(char) > 126 for char in self.user_agent
         ):
@@ -93,6 +104,9 @@ class ScraperConfig:
             "page_attempts",
             "pdf_attempts",
             "log_max_bytes",
+            "ocr_memory_mb",
+            "local_context_tokens",
+            "local_output_tokens",
         }
         for item in fields(self):
             if not isinstance(item.default, (int, float)):

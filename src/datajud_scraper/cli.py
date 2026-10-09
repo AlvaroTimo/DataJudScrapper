@@ -31,6 +31,11 @@ CONFIG_HELP = {
     "challenge_cooldown_seconds": "pausa tras CAPTCHA o HTTP 403 en segundos",
     "contract_mode": "procesamiento de contratos: both, extract o none",
     "contract_retention": "conservar fuentes privadas (keep) o purgarlas tras controles (purge)",
+    "ocr_workers": "procesos OCR (0: automatico, limitado por CPU y RAM)",
+    "ocr_memory_mb": "presupuesto de RAM para estimar el numero de procesos OCR, en MiB",
+    "local_model": "modelo visual instalado en Ollama (4b para equipos pequenos)",
+    "local_context_tokens": "ventana del modelo local en tokens",
+    "local_output_tokens": "limite de salida del modelo local en tokens",
 }
 
 
@@ -82,7 +87,32 @@ def _add_config_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _progress(event: dict) -> None:
-    state = "iniciando" if event["event"] == "record_started" else event["status"]
+    kind = event["event"]
+    if kind == "record_started":
+        state = "iniciando"
+    elif kind == "pdf_validated":
+        state = f"PDF validado: {event['pages']} paginas"
+    elif kind == "inventory_progress":
+        state = (
+            f"lectura/OCR {event['completed']}/{event['page_total']} paginas "
+            f"({event['workers']} procesos, {event['elapsed_seconds']} s)"
+        )
+    elif kind == "model_started":
+        state = f"inferencia local: {event['model']} ({event['task']})"
+    elif kind == "model_finished":
+        state = f"inferencia finalizada: {event['elapsed_seconds']} s"
+    elif kind == "contract_phase_started":
+        state = f"{event['phase']}: iniciando"
+    elif kind == "contract_phase_finished":
+        state = f"{event['phase']}: {event['status']} ({event['elapsed_seconds']} s)"
+    else:
+        state = event["status"]
+        if event.get("timings"):
+            timings = event["timings"]
+            state += (
+                f" (scraper {timings['scraper_seconds']} s, "
+                f"contratos {timings['contract_seconds']} s)"
+            )
     print(
         f"[{event['position']}/{event['total']}] {event['process_number']}: {state}",
         file=sys.stderr,

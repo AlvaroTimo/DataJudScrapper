@@ -245,6 +245,9 @@ def test_keep_then_purge_reuses_verified_output(phases, portal, dataset_factory,
     assert "anonymization: completed" in report
     purged = BatchService(replace(keep, contract_retention="purge")).resume(first["batch_id"])
     assert purged["counts"] == {"contracts_preserved": 1}
+    metrics = result(purged)["contract_processing"]["execution_metrics"]
+    assert metrics["cache_hit"] and metrics["model_calls"] == 0
+    assert metrics["extraction_seconds"] == metrics["anonymization_seconds"] == 0
     assert not raw.exists() and not Path(kept["pdf_path"]).exists()
     assert phases.calls["anonymization"] == portal.call_count == 1
 
@@ -407,7 +410,7 @@ def test_extractor_preflight_does_not_load_privacy_runtime(test_config, monkeypa
         lambda: {"models": {"por.traineddata": "por", "eng.traineddata": "eng"}},
     )
     monkeypatch.setattr(
-        local_model, "LocalModel", lambda *args: SimpleNamespace(close=lambda: None)
+        local_model, "LocalModel", lambda *args, **kwargs: SimpleNamespace(close=lambda: None)
     )
 
     def config(model, *, include_privacy, include_reference):

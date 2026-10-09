@@ -257,6 +257,14 @@ class BatchService:
                 record = DatasetRecord(
                     item["line_number"], item["raw_json"], json.loads(item["raw_json"])
                 )
+                service.progress = lambda event, item=item, record=record: self.progress(
+                    {
+                        "position": item["position"],
+                        "total": len(items),
+                        "process_number": record.cnj,
+                        **event,
+                    }
+                )
                 run_id = str(uuid.uuid4())
                 db.start_run(
                     run_id,
@@ -496,6 +504,7 @@ class BatchService:
                     "process_number": item["process_number"],
                     "status": item["status"],
                     "elapsed_seconds": round(elapsed, 3),
+                    "timings": result.get("timings"),
                     "attempts": attempts,
                     "runs": [dict(run) for run in history],
                     "effective_download_url": (
