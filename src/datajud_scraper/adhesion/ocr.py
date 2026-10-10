@@ -35,12 +35,35 @@ NEURAL_MODELS = {
 }
 
 
+def neural_device():
+    device = os.environ.get("DATAJUD_NEURAL_OCR_DEVICE", "cpu").lower()
+    if device not in ("cpu", "cuda"):
+        raise ValueError("DATAJUD_NEURAL_OCR_DEVICE debe ser cpu o cuda")
+    return device
+
+
+def neural_runtime_version():
+    import onnxruntime
+
+    # CPU and GPU distributions expose the same module, with different metadata names.
+    return onnxruntime.__version__
+
+
 def neural_configuration():
+    device = neural_device()
     return {
         "engine": "rapidocr",
         "packages": {
-            name: version(name) for name in ("rapidocr", "onnxruntime", "numpy", "opencv-python")
+            **{name: version(name) for name in ("rapidocr", "numpy", "opencv-python")},
+            "onnxruntime": neural_runtime_version(),
         },
+        "device": device,
+        "cuda_options": {
+            "device_id": 0,
+            "gpu_mem_limit": 2048 * 1024 * 1024,
+            "cudnn_conv_algo_search": "HEURISTIC",
+            "use_tf32": False,
+        } if device == "cuda" else None,
         "models": {Path(path).name: digest for path, digest in NEURAL_MODELS.values()},
         "unclip_ratio": 1.2,
         "max_side_len": 2000,
@@ -67,11 +90,22 @@ def install_neural_models(root=NEURAL_ROOT):
         temporary.replace(path)
 
 
-@lru_cache(maxsize=1)
 def neural_engine():
+    return _neural_engine(neural_device())
+
+
+@lru_cache(maxsize=1)
+def _neural_engine(device):
+    import onnxruntime
     from rapidocr import LangRec, ModelType, OCRVersion, RapidOCR
 
     config = neural_configuration()
+    if device == "cuda":
+        # Load libraries supplied by the GPU extra before RapidOCR creates sessions.
+        if hasattr(onnxruntime, "preload_dlls"):
+            onnxruntime.preload_dlls(directory="")
+        if "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
+            raise RuntimeError("OCR CUDA no disponible: instalar el extra contracts-cuda")
     params = {
         "Rec.lang_type": LangRec.LATIN,
         "Rec.ocr_version": OCRVersion.PPOCRV5,
@@ -80,7 +114,10 @@ def neural_engine():
         "Global.log_level": "error",
         "EngineConfig.onnxruntime.intra_op_num_threads": config["intra_threads"],
         "EngineConfig.onnxruntime.inter_op_num_threads": config["inter_threads"],
+        "EngineConfig.onnxruntime.use_cuda": device == "cuda",
     }
+    for key, value in (config["cuda_options"] or {}).items():
+        params[f"EngineConfig.onnxruntime.cuda_ep_cfg.{key}"] = value
     for task, (relative, digest) in NEURAL_MODELS.items():
         path = NEURAL_ROOT / Path(relative).name
         if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
@@ -89,7 +126,17 @@ def neural_engine():
             )
         # Explicit verified paths prevent the library from fetching weights at runtime.
         params[f"{task}.model_path"] = str(path)
-    return RapidOCR(params=params)
+    engine = RapidOCR(params=params)
+    if device == "cuda":
+        for component in (engine.text_det, engine.text_cls, engine.text_rec):
+            session = component.session.session
+            providers = session.get_providers()
+            if not providers or providers[0] != "CUDAExecutionProvider":
+                raise RuntimeError("OCR CUDA fallo al inicializar; no se acepta CPU como CUDA")
+            # A provider error during inference must also fail explicitly, rather
+            # than silently resetting an already verified session to CPU.
+            session.disable_fallback()
+    return engine
 
 
 def neural_words(image):

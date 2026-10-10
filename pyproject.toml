@@ -27,6 +27,15 @@ contracts = [
     "rapidocr==3.9.2",
     "onnxruntime>=1.20,<2",
 ]
+contracts-cuda = [
+    "pillow>=12,<13",
+    "pymupdf>=1.28.2,<2",
+    "rapidocr==3.9.2",
+    "onnxruntime-gpu[cuda,cudnn]==1.30.0; python_version >= '3.11' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.uv]
+conflicts = [[{ extra = "contracts" }, { extra = "contracts-cuda" }]]
 
 [project.scripts]
 datajud-scraper = "datajud_scraper.cli:main"

@@ -50,7 +50,7 @@ def configuration(model, *, include_privacy=True, include_reference=True):
         if p.is_file() and p.suffix in (".py", ".json")
     }
     package_names = (
-        ("pymupdf", "pillow", "opencv-python", "rapidocr", "onnxruntime")
+        ("pymupdf", "pillow", "opencv-python", "rapidocr")
         if include_privacy
         else ("pymupdf", "pillow")
     )
@@ -58,6 +58,10 @@ def configuration(model, *, include_privacy=True, include_reference=True):
     from ..ocr_models import MODEL_ROOT
     from .local_model import REFERENCE_MODEL
     from .ocr import neural_configuration, table_configuration
+
+    neural_config = neural_configuration() if include_privacy else None
+    if neural_config:
+        versions["onnxruntime"] = neural_config["packages"]["onnxruntime"]
 
     installed = {m["name"]: m["digest"] for m in model.client.get("/api/tags").json()["models"]}
     if include_reference and REFERENCE_MODEL not in installed:
@@ -83,7 +87,7 @@ def configuration(model, *, include_privacy=True, include_reference=True):
         "tesseract": table_configuration() if include_privacy else None,
         "reference_model": REFERENCE_MODEL,
         "reference_model_digest": installed.get(REFERENCE_MODEL) if include_reference else None,
-        "neural_ocr": neural_configuration() if include_privacy else None,
+        "neural_ocr": neural_config,
         "tesseract_models": {
             str(p.relative_to(MODEL_ROOT)): hash_file(p)
             for p in sorted(MODEL_ROOT.rglob("*.traineddata"))
