@@ -115,14 +115,14 @@ def build_regions(words):
     lines = lines_from_words(words)
     regions = []
 
-    def add(kind, rect, text, recommended=False):
+    def add(kind, rect, text, recommended=False, *, pad=0.002):
         if rect[0] >= rect[2] or rect[1] >= rect[3]:
             return
         regions.append(
             {
                 "id": len(regions),
                 "kind": kind,
-                "rect": padded(rect),
+                "rect": padded(rect, pad),
                 "text": text,
                 "recommended": recommended,
             }
@@ -163,6 +163,9 @@ def build_regions(words):
                     ],
                     content,
                     True,
+                    # Neural character boxes can clip terminal glyphs. A complete
+                    # personal block needs bleed; contractual cells are still protected.
+                    pad=0.006,
                 )
     for position, line in enumerate(lines):
         if line["rect"][1] >= footer_top:
@@ -545,8 +548,9 @@ def anonymize(model, image, page, folder):
     content = json.dumps(
         {"family": page.get("family"), "regions": region_payload(regions)}, ensure_ascii=False
     )
+    original_image = image_bytes(image, 2000)
     response = model.ask(
-        "adhesion_blocks_v1", MASK_PROMPT, content, schema, [image_bytes(image, 2000)]
+        "adhesion_blocks_v1", MASK_PROMPT, content, schema, [original_image]
     )
     if type(response.get("uncertain")) is not bool:
         raise ValueError("missing source uncertainty")
@@ -572,12 +576,13 @@ def anonymize(model, image, page, folder):
         after_words = cached_ocr(cleaned, folder / "ocr")
         after_regions = add_graphics(build_regions(after_words), cleaned, page)
         write_json(folder / f"private-output-regions-{attempt}.json", after_regions)
+        cleaned_image = image_bytes(cleaned, 2000)
         audit = model.ask(
             "adhesion_cleaned_only_v2",
             RESIDUAL_PROMPT,
             json.dumps(region_payload(after_regions, semantic_hints=True), ensure_ascii=False),
             audit_schema,
-            [image_bytes(cleaned, 2000)],
+            [cleaned_image],
         )
         preservation = model.ask(
             "adhesion_preservation_v2",
@@ -592,7 +597,7 @@ def anonymize(model, image, page, folder):
                 "required": ["content_preserved", "uncertain"],
                 "additionalProperties": False,
             },
-            [image_bytes(image, 2000), image_bytes(cleaned, 2000)],
+            [original_image, cleaned_image],
         )
         audit["content_preserved"] = preservation["content_preserved"]
         audit["uncertain"] = audit["uncertain"] or preservation["uncertain"]

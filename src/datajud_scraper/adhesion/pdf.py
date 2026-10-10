@@ -66,7 +66,8 @@ def render_contract_page(
     image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
     source_size = image.size
     box = pixel_box(region.get("rect", [0, 0, 1, 1]), image.width, image.height)
-    image = image.crop(box)
+    if box != (0, 0, image.width, image.height):
+        image = image.crop(box)
     if rotation:
         operation = {
             90: Image.Transpose.ROTATE_270,

@@ -410,14 +410,16 @@ def test_document_resume_reuses_completed_pages_after_interruption(tmp_path, mon
 
 
 def test_one_repair_can_cover_a_region_missing_in_source_ocr(tmp_path, monkeypatch):
-    from PIL import Image
+    from PIL import Image, ImageDraw
 
     from datajud_scraper.adhesion import privacy
 
     class Model:
         audits = 0
+        inspected = []
 
         def ask(self, task, *args):
+            self.inspected.append((task, args[-1]))
             if task == "adhesion_blocks_v1":
                 return {"remove": [], "uncertain": False}
             if task == "adhesion_cleaned_only_v2":
@@ -431,12 +433,46 @@ def test_one_repair_can_cover_a_region_missing_in_source_ocr(tmp_path, monkeypat
 
     reads = iter([[[0.3, 0.5, 0.7, 0.53, "Pessoa Sintetica"]], []])
     monkeypatch.setattr(privacy, "cached_ocr", lambda *args: next(reads))
+    original = Image.new("RGB", (100, 100), "white")
+    ImageDraw.Draw(original).rectangle((30, 50, 69, 52), fill="black")
+    model = Model()
     result = privacy.anonymize(
-        Model(), Image.new("RGB", (100, 100), "white"), page(1, "Clausula contratual"), tmp_path
+        model, original, page(1, "Clausula contratual"), tmp_path
     )
     assert result["status"] == "completed"
     assert result["checks"]["repair_count"] == 1
     assert result["masks"][0]["region_stage"] == "output_ocr_0"
+    selection, first_audit, first_comparison, second_audit, second_comparison = (
+        images for _, images in model.inspected
+    )
+    assert first_comparison == [selection[0], first_audit[0]]
+    assert second_comparison == [selection[0], second_audit[0]]
+    assert first_audit[0] != second_audit[0]
+
+
+def test_personal_block_covers_ink_clipped_by_ocr_without_erasing_contractual_pixels():
+    from PIL import Image, ImageDraw
+
+    from datajud_scraper.adhesion.pdf import redact_pixels
+
+    image = Image.new("RGB", (1000, 1000), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((100, 205, 305, 220), fill="black")
+    draw.rectangle((100, 305, 600, 320), fill="black")
+    words = [
+        [0.1, 0.15, 0.3, 0.17, "DADOS PESSOAIS"],
+        [0.1, 0.2, 0.3, 0.22, "Nome: Pessoa Ficticia"],
+        [0.1, 0.25, 0.6, 0.27, "CLAUSULAS CONTRATUAIS"],
+        [0.1, 0.3, 0.6, 0.32, "Taxa de juros: 2,00%"],
+    ]
+    regions = build_regions(words)
+    selected = [r["id"] for r in regions if r["kind"] == "block"]
+    masks = protect_masks(selected_masks(selected, regions), protected_cells(regions))
+    cleaned, _ = redact_pixels(image, masks, decision_mode="automatic")
+    assert cleaned.crop((100, 205, 306, 221)).getextrema() == ((255, 255),) * 3
+    assert cleaned.crop((100, 305, 601, 321)).tobytes() == image.crop(
+        (100, 305, 601, 321)
+    ).tobytes()
 
 
 def test_correspondent_company_is_preserved_but_individual_agent_is_removable():
