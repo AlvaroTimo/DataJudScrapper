@@ -615,6 +615,15 @@ def detect_with_model(model, pdf, pages, attachments):
     result["unresolved"].extend(cross_unresolved)
     unique = []
     rejected = []
+    if hasattr(pages, "start_prefetch") and hasattr(effective, "retry"):
+        pages.start_prefetch(
+            [
+                instrument["pages"][0]
+                for instrument in result["instruments"]
+                if instrument_evidence(effective[instrument["pages"][0] - 1]) is None
+            ],
+            retry=True,
+        )
     for instrument in result["instruments"]:
         scope, reason = confirm_scope(model, pdf, effective, instrument, regions)
         if scope and scope["foreign_pages"]:

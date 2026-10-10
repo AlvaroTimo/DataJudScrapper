@@ -80,6 +80,13 @@ def content_attachments(pages, attachments):
 def plan_candidates(pages, attachments):
     candidates, indexed = content_attachments(pages, attachments)
     groups, evidence, probes = [], [], []
+    if hasattr(pages, "start_prefetch"):
+        firsts = [
+            n for a in candidates
+            for n in range(a["start_page"], min(a["end_page"], a["start_page"] + 1) + 1)
+        ]
+        rest = [n for a in candidates for n in range(a["start_page"], a["end_page"] + 1)]
+        pages.start_prefetch([*firsts, *rest])
     if hasattr(pages, "prefetch"):
         pages.prefetch([
             n for a in candidates

@@ -98,6 +98,62 @@ def test_parallel_inventory_matches_serial_and_resumes_without_pool(tmp_path, mo
         assert list(pages) == recognized
 
 
+def test_background_inventory_consumes_out_of_order_without_duplicate_reads(tmp_path, monkeypatch):
+    from datajud_scraper.adhesion import inventory
+
+    source = make_source(tmp_path)
+    monkeypatch.setattr(inventory, "worker_limit", lambda *args: 2)
+    with open_inventory(tmp_path, source) as pages:
+        assert pages.start_prefetch(range(1, 9))
+        assert len(pages._pending) == 8
+        assert pages.stats["native_reads"] == 0
+        assert "CARTAO 7" in pages[7]["text"]
+        pages.prefetch(range(1, 9))
+        assert not pages._pending
+        assert pages.stats["native_reads"] == 8
+        assert len(pages._recognized) == 1
+        assert all("CARTAO" in page["text"] for page in pages)
+        assert pages.stats["native_reads"] == 8
+
+
+def test_interruption_terminates_background_workers(tmp_path, monkeypatch):
+    from datajud_scraper.adhesion import inventory
+
+    source = make_source(tmp_path)
+    monkeypatch.setattr(inventory, "worker_limit", lambda *args: 2)
+    with pytest.raises(KeyboardInterrupt), open_inventory(tmp_path, source) as pages:
+        pages.start_prefetch(range(1, 9))
+        processes = list(pages._pool._pool)
+        raise KeyboardInterrupt
+    assert pages._pool is None and not pages._pending
+    assert all(not process.is_alive() for process in processes)
+
+
+def test_parallel_retries_match_serial_and_keep_recognized_inventory(tmp_path, monkeypatch):
+    from datajud_scraper.adhesion import inventory
+    from datajud_scraper.adhesion.text import DEFAULT_TESSDATA
+
+    if not all(
+        (DEFAULT_TESSDATA / name).exists() for name in ("por.traineddata", "eng.traineddata")
+    ):
+        pytest.skip("requires pinned OCR language data")
+    source = make_source(tmp_path, count=3)
+    monkeypatch.setattr(inventory, "worker_limit", lambda *args: 2)
+    with open_inventory(tmp_path, source) as pages:
+        original = pages[0]
+        assert pages.start_prefetch([1, 2], retry=True)
+        parallel = [pages.retry(number) for number in (1, 2)]
+        assert pages.stats["ocr_retries"] == 2
+        assert pages[0] == original
+        assert all(page["ocr_dpi"] == 300 for page in parallel)
+        folder = pages.folder
+    for path in folder.glob("*-retry.json"):
+        path.unlink()
+    with open_inventory(tmp_path, source) as pages:
+        pages.workers = 1
+        assert [pages.retry(number) for number in (1, 2)] == parallel
+
+
 def test_worker_rejects_native_cache_from_another_source(tmp_path, monkeypatch):
     from datajud_scraper.adhesion import inventory
 

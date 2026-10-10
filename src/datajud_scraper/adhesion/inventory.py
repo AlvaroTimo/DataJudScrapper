@@ -10,7 +10,7 @@ import signal
 import time
 from collections import OrderedDict
 from collections.abc import Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from ..pdf_validation import hash_file
@@ -55,9 +55,10 @@ def _initialize_worker(path, folder, source_hash, signature, tessdata):
     _WORKER = (pymupdf.open(path), Path(folder), source_hash, signature, Path(tessdata))
 
 
-def _recognize_worker(number):
+def _recognize_worker(job):
+    number, mode = job
     pdf, folder, source_hash, signature, tessdata = _WORKER
-    stats = {"native_reads": 0, "ocr_pages": 0, "cache_hits": 0}
+    stats = {"native_reads": 0, "ocr_pages": 0, "ocr_retries": 0, "cache_hits": 0}
 
     def load(mode):
         path = folder / f"{number:05d}-{mode}.json"
@@ -85,7 +86,11 @@ def _recognize_worker(number):
             durable=False,
         )
 
-    if load("recognized") is None:
+    cached = load(mode)
+    if cached is None and mode == "retry":
+        save("retry", page_inventory(pdf[number - 1], tessdata, force_ocr=True, dpi=300))
+        stats["ocr_retries"] += 1
+    elif mode == "recognized" and cached is None:
         native = load("native")
         if native is None:
             native = page_inventory(pdf[number - 1], tessdata, recognize=False)
@@ -129,6 +134,10 @@ class PageInventory(Sequence):
         self.progress = options.get("progress")
         self._pool = None
         self._pool_workers = 0
+        self._pending = {}
+        self._generated = set()
+        self._scheduled = self._completed = 0
+        self._started = self._last_update = 0.0
         legacy_ocr_profile = {k: self.profile[k] for k in ("dpi", "pymupdf", "models")}
         self._legacy_path, self._legacy = None, None
         pointer = workspace(root) / "archive.json"
@@ -161,34 +170,43 @@ class PageInventory(Sequence):
 
     def close(self, *, interrupted=False):
         if self._pool is not None:
+            if not interrupted:
+                try:
+                    self._wait(tuple(self._pending))
+                except BaseException:
+                    self.close(interrupted=True)
+                    raise
             pool, self._pool = self._pool, None
             if interrupted:
                 pool.terminate()
             else:
                 pool.close()
             pool.join()
+            self._pending.clear()
 
-    def prefetch(self, numbers):
-        """Visit all requested pages, with isolated MuPDF processes and bounded RAM."""
-        numbers = sorted(set(numbers))
+    def start_prefetch(self, numbers, *, retry=False):
+        """Queue neutral OCR without waiting; the consumer still verifies every page it uses."""
+        numbers = list(dict.fromkeys(numbers))
         if any(type(n) is not int or not 1 <= n <= len(self) for n in numbers):
             raise IndexError("invalid prefetch pages")
-        pending = [n for n in numbers if n not in self._recognized]
+        mode = "retry" if retry else "recognized"
+        cache = self._retried if retry else self._recognized
+        pending = [n for n in numbers if n not in cache and (n, mode) not in self._pending]
         # Legacy migration deliberately follows the same verified sequential path.
-        if self.workers == 1 or len(pending) < 4 or self._legacy_path or not self.pdf.name:
-            for n in pending:
-                self.get(n)
-            return
+        if self.workers == 1 or self._legacy_path or not self.pdf.name:
+            return False
+        if self._pool is None and len(pending) < (2 if retry else 4):
+            return False
         # Avoid starting processes on a cache hit (common when resuming a batch).
         jobs = []
         for number in pending:
-            cached = self._read(number, "recognized")
+            cached = self._read(number, mode)
             if cached is None:
-                jobs.append(number)
+                jobs.append((number, mode))
             else:
-                self._store(self._recognized, number, self._remember(cached))
+                self._store(cache, number, self._remember(cached))
         if not jobs:
-            return
+            return True
         if self._pool is None:
             self._pool_workers = min(self.workers, len(jobs))
             self._pool = multiprocessing.get_context("spawn").Pool(
@@ -202,31 +220,61 @@ class PageInventory(Sequence):
                     self.profile["tessdata"],
                 ),
             )
-        started = time.monotonic()
-        last_update = started
+        if not self._scheduled:
+            self._started = self._last_update = time.monotonic()
+        for job in jobs:
+            self._pending[job] = self._pool.apply_async(_recognize_worker, (job,))
+        self._scheduled += len(jobs)
+        return True
+
+    def prefetch(self, numbers):
+        """Wait for requested pages while other queued pages continue in the background."""
+        numbers = sorted(set(numbers))
+        if not self.start_prefetch(numbers):
+            for number in numbers:
+                self.get(number)
+        else:
+            self._wait([(number, "recognized") for number in numbers])
+
+    def _progress(self):
+        now = time.monotonic()
+        if self.progress and (
+            now - self._last_update >= 2 or self._completed == self._scheduled
+        ):
+            self.progress(
+                {
+                    "event": "inventory_progress",
+                    "completed": self._completed,
+                    "page_total": self._scheduled,
+                    "workers": self._pool_workers,
+                    "elapsed_seconds": round(now - self._started, 3),
+                }
+            )
+            self._last_update = now
+
+    def _collect(self, job, *, wait=False):
+        result = self._pending.get(job)
+        if result is None or (not wait and not result.ready()):
+            return
+        number, stats = result.get(timeout=1 if wait else 0)
+        if number != job[0]:
+            raise ValueError("worker returned another source page")
+        for key, value in stats.items():
+            self.stats[key] += value
+        self._generated.add(job)
+        del self._pending[job]
+        self._completed += 1
+
+    def _wait(self, jobs):
         try:
-            for completed, (number, stats) in enumerate(
-                self._pool.imap_unordered(_recognize_worker, jobs), 1
-            ):
-                for key, value in stats.items():
-                    self.stats[key] += value
-                self._store(
-                    self._recognized, number, self._remember(self._read(number, "recognized"))
-                )
-                self.stats["cache_hits"] -= 1  # The worker just generated this page.
-                if self.progress and (
-                    time.monotonic() - last_update >= 2 or completed == len(jobs)
-                ):
-                    self.progress(
-                        {
-                            "event": "inventory_progress",
-                            "completed": completed,
-                            "page_total": len(jobs),
-                            "workers": self._pool_workers,
-                            "elapsed_seconds": round(time.monotonic() - started, 3),
-                        }
-                    )
-                    last_update = time.monotonic()
+            for job in jobs:
+                while job in self._pending:
+                    try:
+                        self._collect(job, wait=True)
+                    except multiprocessing.TimeoutError:
+                        for other in tuple(self._pending):
+                            self._collect(other)
+                    self._progress()
         except BaseException:
             self.close(interrupted=True)
             raise
@@ -253,7 +301,9 @@ class PageInventory(Sequence):
             or value["page"]["page_number"] != number
         ):
             raise ValueError("page cache belongs to another source/configuration")
-        self.stats["cache_hits"] += 1
+        if (number, mode) not in self._generated:
+            self.stats["cache_hits"] += 1
+        self._generated.discard((number, mode))
         return value["page"]
 
     def _write(self, number, mode, page):
@@ -271,6 +321,7 @@ class PageInventory(Sequence):
 
     def get_native(self, number):
         if number not in self._native:
+            self._wait([(number, "recognized")])
             page = self._read(number, "native")
             if page is None:
                 page = page_inventory(self.pdf[number - 1], DEFAULT_TESSDATA, recognize=False)
@@ -308,6 +359,7 @@ class PageInventory(Sequence):
 
     def get(self, number):
         if number not in self._recognized:
+            self._wait([(number, "recognized")])
             page = self._read(number, "recognized")
             if page is None:
                 native = self.get_native(number)
@@ -331,13 +383,15 @@ class PageInventory(Sequence):
     @staticmethod
     def _remember(page):
         # Ephemeral values: persisted OCR inventories and layouts remain neutral.
-        page["_normalized_body"] = body_text(page)
-        page["_normalized_heading"] = heading_text(page)
+        words = words_normalized(page)
+        page["_normalized_body"] = normalize(" ".join(w[4] for w in words if w[1] < 0.94))
+        page["_normalized_heading"] = normalize(" ".join(w[4] for w in words if w[1] < 0.24))
         return page
 
     def retry(self, number):
         """Return an alternative, keeping good native/OCR data intact if retry worsens it."""
         if number not in self._retried:
+            self._wait([(number, "retry")])
             page = self._read(number, "retry")
             if page is None:
                 page = page_inventory(
@@ -355,19 +409,15 @@ def open_inventory(root, source, *, pdf=None):
     import pymupdf
 
     original = source_path(root, source)
-    if pdf is not None:
-        inventory = PageInventory(root, source, pdf)
+    with nullcontext(pdf) if pdf is not None else pymupdf.open(original) as document:
+        inventory = PageInventory(root, source, document)
         try:
             yield inventory
+        except BaseException:
+            inventory.close(interrupted=True)
+            raise
         finally:
             inventory.close()
-    else:
-        with pymupdf.open(original) as document:
-            inventory = PageInventory(root, source, document)
-            try:
-                yield inventory
-            finally:
-                inventory.close()
 
 
 def load_inventory(root, source):
