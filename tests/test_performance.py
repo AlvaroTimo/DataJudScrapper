@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import runpy
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,46 @@ from datajud_scraper.adhesion.resources import resource_scope, worker_limit
 from datajud_scraper.pdf_validation import hash_file
 
 pymupdf = pytest.importorskip("pymupdf")
+
+
+@pytest.mark.parametrize("scanned", [False, True])
+@pytest.mark.parametrize("defect", [None, "identifier", "clause"])
+def test_positive_benchmark_checks_pixels_independently_of_completed_status(
+    tmp_path, scanned, defect
+):
+    import io
+
+    from datajud_scraper.adhesion.pdf import redact_pixels, render_contract_page
+
+    script = Path(__file__).resolve().parents[1] / "scripts/benchmark_pipeline.py"
+    benchmark = runpy.run_path(str(script))
+    folder = tmp_path / "pdfs"
+    folder.mkdir()
+    source = benchmark["synthetic_source"](tmp_path, folder, scanned=scanned, seed=17)
+    with pymupdf.open(tmp_path / source["relative_path"]) as pdf:
+        image = render_contract_page(pdf, {"page": 1}, dpi=300)
+    masks = [{"rect": [0, 0.9, 1, 1], "category": "test", "origin": "automatic"}]
+    if defect != "identifier":
+        masks.append({"rect": [0, 0.175, 1, 0.32], "category": "test", "origin": "automatic"})
+    if defect == "clause":
+        masks.append({"rect": [0, 0.35, 1, 0.66], "category": "test", "origin": "automatic"})
+    cleaned, _ = redact_pixels(image, masks, decision_mode="automatic")
+    buffer = io.BytesIO()
+    cleaned.save(buffer, format="PNG")
+    output = tmp_path / "cleaned.pdf"
+    with pymupdf.open() as pdf:
+        page = pdf.new_page(width=420, height=550)
+        page.insert_image(page.rect, stream=buffer.getvalue())
+        pdf.save(output)
+    result = {
+        "status": "completed",
+        "instruments": [{"regions": [{"page": 1}], "output": {"path": str(output)}}],
+    }
+    checks = benchmark["synthetic_checks"](tmp_path, source, result)
+    assert checks["positive_completed"] is True
+    assert checks["personal_pixels_erased"] is (defect != "identifier")
+    assert checks["footer_pixels_erased"] is True
+    assert checks["contractual_pixels_preserved"] is (defect != "clause")
 
 
 def make_source(root, count=8):

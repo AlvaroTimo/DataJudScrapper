@@ -88,6 +88,32 @@ seleccionar concurrencia**, no un límite estricto del sistema operativo ni la R
 El inventario mantiene hasta 64 páginas por caché en memoria; el resto queda en disco.
 Las cachés OCR son compactas, privadas y se publican de forma atómica; los manifiestos y
 las salidas conservan sincronización a disco y verificación de hashes.
+El OCR de las páginas restantes comienza en segundo plano mientras se consumen las sondas
+y se consulta al modelo. Los reintentos a 300 dpi también usan el mismo grupo de procesos;
+cada consumidor espera y verifica únicamente los resultados que necesita. Una interrupción
+termina los procesos pendientes. El recorrido residual sigue examinando todas las páginas.
+
+El OCR neuronal de fotografías/escaneos puede usar CUDA de forma explícita. Para preparar
+un entorno separado en Linux x86_64 con el Python fijado por el proyecto:
+
+```bash
+UV_PROJECT_ENVIRONMENT=.venv-cuda uv sync --locked --extra contracts-cuda
+DATAJUD_NEURAL_OCR_DEVICE=cuda .venv-cuda/bin/python -m datajud_scraper.adhesion.ocr
+DATAJUD_NEURAL_OCR_DEVICE=cuda .venv-cuda/bin/datajud-scraper resume <batch-id> \
+  --contract-mode both --contract-retention keep
+```
+
+`contracts` instala ONNX en CPU; `contracts-cuda` instala ONNX GPU y sus bibliotecas CUDA
+y cuDNN. Son extras excluyentes para evitar que dos distribuciones sobrescriban el mismo
+módulo. El driver NVIDIA debe ser compatible con esas bibliotecas. Se comprueba el proveedor
+activo de las tres sesiones neuronales: un fallo CUDA no se presenta como una medición GPU
+con ejecución en CPU, tampoco durante la inferencia. El dispositivo y sus opciones forman
+parte de la firma de anonimización.
+La opción utiliza el dispositivo 0, desactiva TF32 y limita la arena a 2048 MiB **por sesión**;
+esto no limita toda la VRAM del proceso ni incluye Ollama. El valor predeterminado sigue
+siendo `cpu`. El OCR Tesseract del inventario y la revisión independiente de la salida
+siguen en CPU. CUDA se ha verificado en la RTX 5090; falta verificar memoria y latencia
+al compartir la Quadro de 16 GB con el modelo visual.
 
 La consola muestra lectura/OCR, inferencias y fases. `results.jsonl` incluye `timings`
 (`scraper_seconds`, `contract_seconds`, `total_seconds`) y las métricas de contratos
@@ -169,7 +195,7 @@ Opciones evaluadas y decisiones:
 | Modelos menores y contexto/salida configurables | Implementado como opciones; 4B y 9B ensayados, sin evidencia suficiente para sustituir el 27B predeterminado. |
 | Omitir OCR, búsqueda residual o revisiones visuales | No aplicado: podría omitir contratos o aceptar contenido sin verificar. |
 | Bajar dpi o sustituir el OCR | Requiere comparación independiente de detección, legibilidad y privacidad; no aplicado por defecto. |
-| OCR con CUDA/TensorRT | Posible experimento para equipos con GPU; el runtime instalado solo dispone de OCR ONNX en CPU. No validado en la GPU objetivo. |
+| OCR con CUDA/TensorRT | CUDA neuronal disponible mediante un entorno separado, con proveedor activo verificado. TensorRT y la Quadro objetivo no están validados. |
 | Modelo entrenado específicamente para estas plantillas | Requiere etiquetas y evaluación independiente; no existe un conjunto validado vigente que permita sustituir el verificador. |
 | Solapar descargas y procesamiento; paralelizar expedientes | Puede mejorar rendimiento de lotes, no garantiza latencia por PDF; requiere coordinar sesiones y límites globales. |
 | Aplazar trabajo o imponer un timeout de 5 s | Limitaría la espera dejando trabajo pendiente; no satisface el requisito de procesamiento completo. |
@@ -181,6 +207,52 @@ Fuentes técnicas: [multiprocesamiento en PyMuPDF](https://pymupdf.readthedocs.i
 [modelo visual Qwen 4B](https://ollama.com/library/qwen3.5:4b),
 [Qwen 9B](https://ollama.com/library/qwen3.5:9b) y
 [duraciones de inferencia Ollama](https://docs.ollama.com/api/chat).
+La instalación GPU y su precarga siguen la
+[documentación del proveedor CUDA de ONNX Runtime](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html).
+
+Auditoría adicional del 10 de octubre de 2026, con objetivo de **10 s para extracción más
+anonimización**. Se midieron inventario, OCR, reintentos, inferencia, máscaras, salida y
+validación, incluyendo contratos sintéticos positivos con datos ficticios. La comparación
+de código usa un snapshot del commit anterior y espacios privados nuevos, con el 27B ya
+cargado en ambos casos. Las cachés de aplicación están vacías; Ollama y el sistema operativo
+pueden reutilizar su estado en memoria.
+
+| Ensayo | Procesamiento | Resultado |
+| --- | ---: | --- |
+| 290 páginas, snapshot anterior, 27B, 12 procesos / 4096 MiB | 39,7 s | 74 páginas OCR, 2 reintentos, 2 grupos pendientes |
+| Mismo PDF, código actual, misma concurrencia y modelo cargado | 33,5 s | Mismos contadores OCR y 2 grupos pendientes |
+| Mismo PDF, código actual, 23 procesos / 8192 MiB | 26,2 s | Mismos contadores OCR y 2 grupos pendientes |
+| Mismo PDF, código actual, 12 procesos, tras cambiar de modelo | 51,4 s | 24,6 s de inferencia, incluidos 6,5 s de carga |
+| Inventario de otro expediente, 469 páginas, 23 procesos / 8192 MiB | 32,8 s | 95 páginas OCR; no incluye detección ni anonimización |
+| Positivo nativo de una página, 27B | 17,0 s | Completado y comprobado por píxeles; 15,7 s en seis inferencias |
+| Positivo nativo de una página, 8B Q8, contexto 8192, modelo cargado | 10,7 s | Completado; identificadores y cláusulas comprobados por píxeles |
+| Positivo escaneado de una página, 8B Q8, contexto 8192, OCR neuronal CPU | 13,7 s | Completado; identificadores y cláusulas comprobados por píxeles |
+| Positivo escaneado de una página, mismas opciones y OCR neuronal CUDA cargado | 11,4 s | Completado; identificadores, pie judicial y cláusulas comprobados por píxeles |
+| Positivo nativo, 4B / 9B | 2,3 s / 4,4 s | Sin contrato confirmado; revisión pendiente, no anonimización completa |
+
+La reducción con 12 procesos es del 16%; el ensayo de 23 procesos también cambia el
+presupuesto de recursos y no mide solamente una mejora de código. Todos estos ensayos
+utilizan el host Core Ultra 9 / RTX 5090 descrito arriba. En los expedientes sin contratos
+confirmados la fase de anonimización no procesa páginas: no deben compararse con positivos.
+Las muestras sintéticas cambian nombre e importe entre pruebas para evitar reutilizar
+exactamente la misma entrada visual. No sustituyen un corpus real etiquetado.
+
+| Componente auditado | Hallazgo y cambio |
+| --- | --- |
+| Fuente, SHA-256 e identidad del proceso | Unos 0,04 s en el PDF de 40,5 MB; se conserva la validación. |
+| Texto nativo, coordenadas y límites | El perfil registró 1,07 s en normalizar coordenadas; cuerpo y encabezado ahora comparten una conversión. Se conservan las reglas de separación y evidencia. |
+| OCR del inventario | 74 páginas únicas; no hay duplicados de imagen completos que permitan evitar OCR. Se solapa el trabajo con las inferencias, manteniendo los límites de CPU/RAM. |
+| Reintentos de confirmación | Dos OCR a 300 dpi consumían 7,05 s en serie. Se programan en paralelo sin cambiar la resolución ni el contenido examinado. |
+| Modelo visual | Domina el positivo 27B. Los modelos 4B/9B rápidos dejaron revisión pendiente. Aumentar `num_batch` a 1024 no mejoró el positivo 8B: 10,7–10,8 s. No se cambia el modelo predeterminado. |
+| OCR neuronal de privacidad | En la misma imagen de prueba, CUDA activo produjo las mismas 176 palabras y cajas: 0,19 s tras inicializar, frente a 1,05–2,01 s en CPU. El primer pase CUDA tardó 0,90 s. |
+| Máscaras y comprobaciones | Se reutiliza la codificación PNG de cada imagen entre controles independientes; una reparación genera otra imagen. Se corrigió un carácter parcialmente visible al borde de un bloque personal escaneado, conservando los píxeles contractuales. |
+| Recorte, memoria y salida | Se evita copiar un recorte de página completa. Continúan las salidas a 300 dpi, publicación durable, verificación de artefactos y cachés ligadas a fuente/configuración. |
+
+**El máximo de 10 s no se alcanzó para documentos nuevos.** El OCR exhaustivo de expedientes
+grandes y las seis inferencias de un positivo siguen superándolo. Las mejoras medidas no
+constituyen una garantía para cualquier número de páginas, escaneo o hardware. Reemplazar
+los verificadores por decisiones más ligeras requiere medir cobertura y privacidad con
+contratos reales etiquetados; no se acepta un resultado pendiente como cumplimiento del plazo.
 
 Para reproducir las mediciones sin descargar de nuevo ni alterar el lote:
 
@@ -199,6 +271,24 @@ esas duraciones ya están incluidas en `model_seconds`. `measured_total_seconds`
 preparación, validación de fuente y procesamiento. Las repeticiones no vuelven a preparar
 el runtime. `worker_limit` muestra la concurrencia permitida y `parallel_workers_used`
 los procesos utilizados por el inventario; una reutilización sin procesos informa cero.
+
+Para medir un positivo ficticio con el modelo real y comprobar los píxeles de salida:
+
+```bash
+.venv/bin/python scripts/benchmark_pipeline.py \
+  --synthetic-positive scanned --fixture-seed 22 --phase both \
+  --model qwen3-vl:8b-instruct-q8_0 --context-tokens 8192 \
+  --output data/performance/positive-scanned.json
+```
+
+`--synthetic-positive native` ensaya texto nativo; `scanned` ensaya la imagen con pie nativo,
+como los expedientes escaneados del catálogo. `--fixture-seed` cambia datos ficticios e
+importe. `extraction_seconds` y `anonymization_seconds` separan ambas fases;
+`neural_ocr_device` registra CPU/CUDA. `fixture_checks` comprueba identificadores conocidos,
+pie judicial y conservación de cláusulas, aunque la fase informe `completed`. Estos controles
+de referencia se ejecutan después de medir el procesamiento. La muestra y sus artefactos
+temporales se eliminan al finalizar. Para CUDA, use el mismo comando con `.venv-cuda/bin/python`
+y `DATAJUD_NEURAL_OCR_DEVICE=cuda`.
 
 ## Piloto y lotes
 
@@ -382,6 +472,7 @@ opciones si había personalizado la consulta o los límites.
 | `--contract-retention` | `DATAJUD_CONTRACT_RETENTION` | `purge` |
 | `--ocr-workers` | `DATAJUD_OCR_WORKERS` | 0 (automático) |
 | `--ocr-memory-mb` | `DATAJUD_OCR_MEMORY_MB` | 2048 |
+| Solo variable de entorno (OCR neuronal) | `DATAJUD_NEURAL_OCR_DEVICE` | `cpu` (`cuda` requiere el extra GPU) |
 | `--local-model` | `DATAJUD_LOCAL_MODEL` | `qwen3.5:27b` |
 | `--local-context-tokens` | `DATAJUD_LOCAL_CONTEXT_TOKENS` | 32768 |
 | `--local-output-tokens` | `DATAJUD_LOCAL_OUTPUT_TOKENS` | 2048 |
