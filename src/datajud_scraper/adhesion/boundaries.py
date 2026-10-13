@@ -16,19 +16,56 @@ SEPARATE_TITLE = re.compile(
     r"contrato (?:de|do) (?:emprestimo|financiamento))"
 )
 
+CLAUSE_HEADING = re.compile(
+    r"^(?:\d+[.)-]?\s+)?(?:clausulas|condicoes (?:gerais|especificas|do cartao|de uso))"
+)
+
 
 def heading_lines(page):
+    return [row["normalized"] for row in heading_rows(page)]
+
+
+def heading_rows(page):
     return [
-        row["normalized"]
+        row
         for row in lines_from_words(words_normalized(page))
         if row["rect"][1] < 0.24 and len(row["normalized"]) >= 6
     ]
 
 
-def independent_title(page):
-    """Match a real caption, not a credit-note reference inside an adhesion clause."""
-    for line in heading_lines(page)[:8]:
+def wrapped_clause_line(rows, index):
+    """A line inside a justified paragraph, not a caption that starts a new document."""
+    if index == 0 or index + 1 >= len(rows):
+        return False
+    previous, row, following = rows[index - 1], rows[index], rows[index + 1]
+    height = row["rect"][3] - row["rect"][1]
+    if height <= 0:
+        return False
+    similar = all(
+        abs((r["rect"][3] - r["rect"][1]) - height) <= 0.15 * height for r in (previous, following)
+    )
+    return (
+        similar
+        and row["rect"][1] - previous["rect"][3] < 1.2 * height
+        and following["rect"][1] - row["rect"][3] < 0.8 * height
+        and row["rect"][2] - row["rect"][0] > 0.6
+        and previous["rect"][2] - previous["rect"][0] > 0.6
+        and not previous["normalized"].rstrip().endswith((".", ":"))
+    )
+
+
+def independent_title(page, *, wrapped_check=False):
+    """Match a real caption, not a credit-note reference inside an adhesion clause.
+
+    wrapped_check ignores a matching line that sits inside a paragraph (a clause wrapped
+    right before "Regulamento de ..."); it is used only where a page is forced to N.
+    """
+    rows = heading_rows(page)[:8]
+    for index, row in enumerate(rows):
+        line = row["normalized"]
         if SEPARATE_TITLE.search(line):
+            if wrapped_check and wrapped_clause_line(rows, index):
+                continue
             return True
         if ADHESION.search(line) and CARD.search(line):
             return False
@@ -139,11 +176,124 @@ def repair_numbered_continuations(pages, roles):
             covered.update(group)
 
 
-def resolve_roles(pages, raw_roles, *, attachments=()):
+def counter_runs(pages, roles, attachments=()):
+    """Force A/C/E on complete printed runs 1/n..n/n that start with adhesion evidence.
+
+    Returns the changes and the pages 1..n-1 that later visual rechecks must not undo.
+    The last page is never locked and is not forced to E when integral benefits follow.
+    """
+    changes, locked = [], set()
+    for start in sorted(roles):
+        if start in locked:
+            continue
+        counter = printed_counter(pages[start - 1])
+        if not counter or counter[0] != 1 or counter[1] < 2:
+            continue
+        run = list(range(start, start + counter[1]))
+        if run[-1] > len(pages) or any(n not in roles for n in run):
+            continue
+        if attachments and not any(
+            a["start_page"] <= start and run[-1] <= a["end_page"] for a in attachments
+        ):
+            continue
+        printed = [printed_counter(pages[n - 1]) for n in run]
+        # A two-sheet term often prints "1 de 2" only on its front: accept a back sheet
+        # without counter when it is a full page of text and not another start.
+        front_only = (
+            counter[1] == 2
+            and printed[1] is None
+            and instrument_evidence(pages[run[1] - 1]) is None
+            and len(body_text(pages[run[1] - 1]).split()) >= 150
+        )
+        if not front_only and any(c != (k + 1, counter[1]) for k, c in enumerate(printed)):
+            continue
+        if instrument_evidence(pages[start - 1]) is None or any(roles[n] == "F" for n in run):
+            continue
+        if any(independent_title(pages[n - 1], wrapped_check=True) for n in run[1:]):
+            continue
+        last = run[-1]
+        extends = last < len(pages) and continuation_evidence(pages[last - 1], pages[last])
+        target = dict.fromkeys(run, "C")
+        target[start] = "A"
+        if not extends:
+            target[last] = "E"
+        for n, role in target.items():
+            if roles[n] != role:
+                changes.append(
+                    {
+                        "page": n,
+                        "before": roles[n],
+                        "after": role,
+                        "reason": "complete_printed_counter_run",
+                    }
+                )
+                roles[n] = role
+        # Without a counter on the back sheet only the lock keeps the recheck from
+        # turning that closing page into a continuation.
+        locked.update(run if front_only and not extends else run[:-1])
+    return changes, locked
+
+
+def cover_page(page):
+    """A separator sheet (DOC. 01, a dossier barcode) carries almost no body text."""
+    return (
+        len(body_text(page).split()) < 60
+        and instrument_evidence(page) is None
+        and printed_counter(page) is None
+    )
+
+
+def repair_starts(pages, roles, attachments=(), locked=()):
+    """Undo two visual mistakes about where a term starts, after the boundary recheck.
+
+    A cover sheet labelled A hides the real first page from the scope confirmation, and a
+    clause sheet right after a start is a continuation, not a new term.
+    """
+
+    def same_attachment(first, last):
+        return not attachments or any(
+            a["start_page"] <= first and last <= a["end_page"] for a in attachments
+        )
+
+    changes = []
+
+    def change(number, role, reason):
+        changes.append({"page": number, "before": roles[number], "after": role, "reason": reason})
+        roles[number] = role
+
+    def starts_term(page):
+        counter = printed_counter(page)
+        return instrument_evidence(page) is not None or bool(counter and counter[0] == 1)
+
+    for number in sorted(roles):
+        role, following = roles[number], roles.get(number + 1)
+        if (
+            role == "A"
+            and following in ("C", "E")
+            and same_attachment(number, number + 1)
+            and cover_page(pages[number - 1])
+            and starts_term(pages[number])
+        ):
+            change(number, "N", "cover_sheet_before_term")
+            change(number + 1, "A" if following == "C" else "B", "cover_sheet_before_term")
+        elif (
+            role == "A"
+            and number not in locked
+            and roles.get(number - 1) in ("A", "C")
+            and same_attachment(number - 1, number)
+            and instrument_evidence(pages[number - 1]) is None
+            and not independent_title(pages[number - 1])
+            and any(CLAUSE_HEADING.search(line) for line in heading_lines(pages[number - 1])[:3])
+        ):
+            change(number, "C", "clause_sheet_continues_term")
+    return changes
+
+
+def resolve_roles(pages, raw_roles, *, attachments=(), locked=None):
     roles = dict(raw_roles)
     changes = []
     for number in roles:
-        if independent_title(pages[number - 1]):
+        if independent_title(pages[number - 1], wrapped_check=True):
             if roles[number] != "N":
                 changes.append(
                     {
@@ -154,6 +304,10 @@ def resolve_roles(pages, raw_roles, *, attachments=()):
                     }
                 )
             roles[number] = "N"
+    counted, run_pages = counter_runs(pages, roles, attachments)
+    changes.extend(counted)
+    if locked is not None:
+        locked.update(run_pages)
     before = dict(roles)
     if attachments:
         for a in attachments:
@@ -170,8 +324,37 @@ def resolve_roles(pages, raw_roles, *, attachments=()):
     return roles, changes
 
 
-def assemble_roles(pages, roles, *, deduplicate=True, attachments=(), allowed_crossings=()):
-    instruments, unresolved, fragments = [], [], []
+def foreign_continuation(pages, roles, number, excluded, raw_roles=None):
+    """A C/E page continuing a contiguous page already judged another document (N/F).
+
+    Kept as a doubt whenever anything hints at a missed adhesion start: evidence on either
+    page, a first page relabelled by a rule, weak text, or a counter restarting at 1.
+    """
+    previous = number - 1
+    if previous not in roles or not (roles[previous] in ("N", "F") or previous in excluded):
+        return False
+    before, current = pages[previous - 1], pages[number - 1]
+    for page in (before, current):
+        if instrument_evidence(page) or (
+            ADHESION.search(heading_text(page)) and CARD.search(heading_text(page))
+        ):
+            return False
+    if (
+        raw_roles
+        and raw_roles.get(previous) in ("A", "B")
+        and roles[previous] != raw_roles[previous]
+    ):
+        return False
+    if len(body_text(before)) < 80 or len(body_text(current)) < 80:
+        return False
+    counter = printed_counter(current)
+    return not (counter and counter[0] == 1)
+
+
+def assemble_roles(
+    pages, roles, *, deduplicate=True, attachments=(), allowed_crossings=(), raw_roles=None
+):
+    instruments, unresolved, fragments, excluded = [], [], [], []
     active = []
     starts = {a["start_page"] for a in attachments}
     allowed = set(allowed_crossings)
@@ -217,6 +400,10 @@ def assemble_roles(pages, roles, *, deduplicate=True, attachments=(), allowed_cr
                 active.append(number)
                 if role == "E":
                     close(True)
+            elif number not in starts and foreign_continuation(
+                pages, roles, number, set(excluded), raw_roles
+            ):
+                excluded.append(number)
             else:
                 unresolved.append({"pages": [number], "reason": "orphan_continuation"})
         else:
@@ -231,5 +418,8 @@ def assemble_roles(pages, roles, *, deduplicate=True, attachments=(), allowed_cr
         "instruments": instruments,
         "unresolved": unresolved,
         "fragments": fragments,
+        # Audit trail: continuations of documents already judged out of scope. They are
+        # reported separately and never counted as resolved adhesions.
+        "excluded_continuations": excluded,
         "page_roles": roles,
     }

@@ -53,9 +53,31 @@ def source_pdf(pages):
         yield pdf
 
 
+NO_FACTS = {
+    "adhesion_title": False,
+    "applicant_fields": False,
+    "fields_filled": False,
+    "title_starts_page": False,
+    "judicial_context": False,
+    "other_document_title": False,
+}
+GOOD_FACTS = {**NO_FACTS, "adhesion_title": True, "applicant_fields": True}
+GOOD_FACTS.update(fields_filled=True, title_starts_page=True)
+
+
+GOOD_END = {
+    "signature_or_acceptance": True,
+    "service_channels": True,
+    "text_cut": False,
+    "other_document": False,
+}
+
+
 class Model:
-    def __init__(self, roles, *, kind="personalized", revised=None):
+    def __init__(self, roles, *, kind="personalized", revised=None, facts=None, end=None):
         self.roles, self.kind, self.revised = roles, kind, revised or roles
+        self.facts = facts or NO_FACTS
+        self.end = end
         self.calls = []
 
     def ask(self, task, system, content, schema, images=()):
@@ -71,8 +93,12 @@ class Model:
                 "complete_start": self.kind not in ("not_target", "uncertain"),
                 "foreign_content": False,
             }
+        if task == "adhesion_instrument_scope_facts_v1":
+            return dict(self.facts)
         if task == "adhesion_instrument_end_v1":
-            return {"complete_end": True, "foreign_content": False, "uncertain": False}
+            return {"complete_end": self.end is None, "foreign_content": False, "uncertain": False}
+        if task == "adhesion_instrument_end_facts_v1":
+            return dict(self.end)
         if task == "adhesion_duplicate_identity_v1":
             return {"number": ""}
         if task == "adhesion_region_selection_v1":
@@ -291,10 +317,87 @@ def test_structured_scope_distinguishes_templates_negatives_and_uncertainty(kind
     with source_pdf(pages) as pdf:
         result = detect_with_model(Model({1: "B"}, kind=kind), pdf, pages, [attachment(1, 1)])
     assert bool(result["instruments"]) == (kind in ("personalized", "blank_template"))
-    assert bool(result["unresolved"]) == (kind == "uncertain")
-    assert bool(result["rejected"]) == (kind == "not_target")
+    # A card-adhesion heading rejected by the model is kept as a visible doubt, never dropped.
+    assert bool(result["unresolved"]) == (kind in ("uncertain", "not_target"))
+    assert not result["rejected"]
+    if kind == "not_target":
+        assert result["unresolved"][0]["reason"] == "scope_evidence_conflict"
     if result["instruments"]:
         assert result["instruments"][0]["kind"] == kind
+
+
+def test_model_rejection_without_adhesion_heading_is_still_rejected():
+    pages = [page(1, "PROPOSTA DE CREDITO PESSOAL")]
+    with source_pdf(pages) as pdf:
+        result = detect_with_model(
+            Model({1: "B"}, kind="not_target"),
+            pdf,
+            pages,
+            [attachment(1, 1, "TERMO DE ADESAO CARTAO")],
+        )
+    assert result["rejected"] and not result["unresolved"]
+
+
+@pytest.mark.parametrize("kind", ["uncertain", "not_target", "blank_template"])
+def test_doubtful_scope_with_heading_is_accepted_only_on_coherent_facts(kind):
+    pages = [page(1, "TERMO DE ADESAO AO CARTAO")]
+
+    class Incoherent(Model):
+        def ask(self, task, system, content, schema, images=()):
+            answer = super().ask(task, system, content, schema, images)
+            if task == "adhesion_instrument_scope_v1":
+                return {**answer, "card_adhesion": False, "complete_start": False}
+            return answer
+
+    model = Incoherent({1: "B"}, kind=kind, facts=GOOD_FACTS)
+    with source_pdf(pages) as pdf:
+        result = detect_with_model(model, pdf, pages, [attachment(1, 1)])
+    target = result["instruments"][0]
+    assert target["kind"] == "personalized"
+    assert target["scope_rule"] == "card_adhesion_heading+decomposed_scope_review"
+    assert target["scope_review"]["first_answer"]["kind"] == kind
+    # One decomposed re-ask, never repeated until a yes.
+    tasks = [task for task, _ in model.calls]
+    assert tasks.count("adhesion_instrument_scope_facts_v1") == 1
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        {**GOOD_FACTS, "judicial_context": True},
+        {**GOOD_FACTS, "other_document_title": True},
+        {**GOOD_FACTS, "title_starts_page": False},
+        {**GOOD_FACTS, "applicant_fields": False},
+    ],
+)
+def test_doubtful_scope_stays_visible_when_any_fact_disagrees(facts):
+    pages = [page(1, "TERMO DE ADESAO AO CARTAO")]
+    with source_pdf(pages) as pdf:
+        result = detect_with_model(
+            Model({1: "B"}, kind="uncertain", facts=facts), pdf, pages, [attachment(1, 1)]
+        )
+    assert not result["instruments"] and not result["rejected"]
+    record = result["unresolved"][0]
+    assert record["reason"] == "instrument_scope_or_boundary_uncertainty"
+    assert record["scope_review"]["facts"] == facts
+
+
+def test_scope_without_deterministic_evidence_is_never_re_asked():
+    pages = [page(1, "PROPOSTA DE CREDITO PESSOAL")]
+    model = Model({1: "B"}, kind="uncertain", facts=GOOD_FACTS)
+    with source_pdf(pages) as pdf:
+        result = detect_with_model(model, pdf, pages, [attachment(1, 1, "TERMO DE ADESAO CARTAO")])
+    assert not result["instruments"]
+    assert all(task != "adhesion_instrument_scope_facts_v1" for task, _ in model.calls)
+
+
+def test_debit_card_rejection_is_kept_without_re_ask():
+    pages = [page(1, "TERMO DE ADESAO AO CARTAO DE DEBITO")]
+    model = Model({1: "B"}, kind="not_target", facts=GOOD_FACTS)
+    with source_pdf(pages) as pdf:
+        result = detect_with_model(model, pdf, pages, [attachment(1, 1)])
+    assert result["rejected"] and not result["instruments"] and not result["unresolved"]
+    assert all(task != "adhesion_instrument_scope_facts_v1" for task, _ in model.calls)
 
 
 def test_complete_embedded_form_gets_measured_region_and_preserves_source_role():
@@ -538,3 +641,79 @@ def test_pipeline_cleans_the_crop_in_the_same_coordinate_space(tmp_path, monkeyp
         image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         assert image.crop(captured[0]).getextrema() == ((255, 255), (255, 255), (255, 255))
     assert hash_file(tmp_path / source["relative_path"]) == source["sha256"]
+
+
+def test_two_sheet_term_with_counter_only_on_its_front_is_kept_whole():
+    back = " ".join(["clausula de uso do cartao e limite de credito"] * 20)
+    pages = [page(1, "TERMO DE ADESAO AO CARTAO", "1/2"), page(2, back)]
+    model = Model({1: "A", 2: "E"}, revised={1: "A", 2: "C"})
+    with source_pdf(pages) as pdf:
+        result = detect_with_model(model, pdf, pages, [attachment(1, 2)])
+    assert result["instruments"][0]["pages"] == [1, 2]
+    assert not result["unresolved"]
+
+
+def test_cover_sheet_labelled_as_start_is_dropped_before_scope_review():
+    pages = [page(1, "DOC. 02"), page(2, "TERMO DE ADESAO AO CARTAO"), page(3, "Assinatura e SAC")]
+    with source_pdf(pages) as pdf:
+        result = detect_with_model(Model({1: "A", 2: "C", 3: "E"}), pdf, pages, [attachment(1, 3)])
+    assert result["instruments"][0]["pages"] == [2, 3]
+    assert {c["reason"] for c in result["boundary_changes"]} >= {"cover_sheet_before_term"}
+
+
+def test_clause_sheet_after_a_start_continues_the_term():
+    pages = [
+        page(1, "TERMO DE ADESAO AO CARTAO"),
+        page(2, "CLAUSULAS E CONDICOES DO CARTAO BENEFICIO CONSIGNADO"),
+        page(3, "Assinatura e SAC"),
+    ]
+    with source_pdf(pages) as pdf:
+        result = detect_with_model(Model({1: "A", 2: "A", 3: "E"}), pdf, pages, [attachment(1, 3)])
+    assert result["instruments"][0]["pages"] == [1, 2, 3]
+    assert not result["unresolved"]
+
+
+@pytest.mark.parametrize(
+    "end, closing, accepted",
+    [
+        (GOOD_END, "Assinatura do cliente e SAC", True),
+        ({**GOOD_END, "text_cut": True}, "Assinatura do cliente e SAC", False),
+        ({**GOOD_END, "other_document": True}, "Assinatura do cliente e SAC", False),
+        (GOOD_END, "5. O limite do cartao sera", False),
+    ],
+)
+def test_doubtful_ending_is_accepted_only_with_closing_text_and_coherent_facts(
+    end, closing, accepted
+):
+    pages = [page(1, "TERMO DE ADESAO AO CARTAO"), page(2, closing)]
+    model = Model({1: "A", 2: "E"}, end=end)
+    with source_pdf(pages) as pdf:
+        result = detect_with_model(model, pdf, pages, [attachment(1, 2)])
+    assert bool(result["instruments"]) == accepted
+    asked = [task for task, _ in model.calls].count("adhesion_instrument_end_facts_v1")
+    assert asked == (1 if "Assinatura" in closing else 0)
+    if accepted:
+        assert result["instruments"][0]["scope_rule"].endswith("+decomposed_end_review")
+    else:
+        assert result["unresolved"][0]["reason"] == "instrument_scope_or_boundary_uncertainty"
+
+
+def test_bundle_sheet_counter_does_not_extend_a_closed_term():
+    pages = [
+        page(1, "TERMO DE ADESAO AO CARTAO", "3/9"),
+        page(2, "Assinatura do cliente e SAC", "4/9"),
+        page(3, "Trilha de aceites da contratacao", "5/9"),
+    ]
+    with source_pdf(pages) as pdf:
+        result = detect_with_model(Model({1: "A", 2: "E", 3: "N"}), pdf, pages, [attachment(1, 3)])
+    assert result["instruments"][0]["pages"] == [1, 2]
+
+
+def test_rejected_term_whose_title_is_legible_only_on_its_second_sheet_is_re_asked():
+    form = " ".join(["Dados do cliente e da operacao nome endereco renda"] * 10)
+    pages = [page(1, form), page(2, "TERMO DE ADESAO AO CARTAO")]
+    model = Model({1: "A", 2: "E"}, kind="not_target", facts=GOOD_FACTS)
+    with source_pdf(pages) as pdf:
+        result = detect_with_model(model, pdf, pages, [attachment(1, 2)])
+    assert result["instruments"][0]["pages"] == [1, 2]
+    assert [task for task, _ in model.calls].count("adhesion_instrument_scope_facts_v1") == 1

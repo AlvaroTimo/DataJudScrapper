@@ -436,9 +436,7 @@ def test_one_repair_can_cover_a_region_missing_in_source_ocr(tmp_path, monkeypat
     original = Image.new("RGB", (100, 100), "white")
     ImageDraw.Draw(original).rectangle((30, 50, 69, 52), fill="black")
     model = Model()
-    result = privacy.anonymize(
-        model, original, page(1, "Clausula contratual"), tmp_path
-    )
+    result = privacy.anonymize(model, original, page(1, "Clausula contratual"), tmp_path)
     assert result["status"] == "completed"
     assert result["checks"]["repair_count"] == 1
     assert result["masks"][0]["region_stage"] == "output_ocr_0"
@@ -470,12 +468,13 @@ def test_personal_block_covers_ink_clipped_by_ocr_without_erasing_contractual_pi
     masks = protect_masks(selected_masks(selected, regions), protected_cells(regions))
     cleaned, _ = redact_pixels(image, masks, decision_mode="automatic")
     assert cleaned.crop((100, 205, 306, 221)).getextrema() == ((255, 255),) * 3
-    assert cleaned.crop((100, 305, 601, 321)).tobytes() == image.crop(
-        (100, 305, 601, 321)
-    ).tobytes()
+    assert (
+        cleaned.crop((100, 305, 601, 321)).tobytes() == image.crop((100, 305, 601, 321)).tobytes()
+    )
 
 
-def test_correspondent_company_is_preserved_but_individual_agent_is_removable():
+def test_intermediary_data_is_masked_but_issuing_bank_stays_visible():
+    # Project decision: the intermediary that sold the card is masked like personal data.
     regions = build_regions(
         [
             [0.1, 0.10, 0.8, 0.12, "Correspondente no Pais"],
@@ -483,15 +482,18 @@ def test_correspondent_company_is_preserved_but_individual_agent_is_removable():
             [0.1, 0.18, 0.8, 0.20, "Endereco: Rua Comercial 100"],
             [0.1, 0.22, 0.3, 0.24, "Agente:"],
             [0.4, 0.22, 0.8, 0.24, "Pessoa Sintetica"],
-            [0.1, 0.3, 0.8, 0.32, "Dados Titular"],
-            [0.1, 0.34, 0.8, 0.36, "Endereco Comercial: Rua Privada 100"],
+            [0.1, 0.30, 0.8, 0.32, "III - Dados do Emissor"],
+            [0.1, 0.34, 0.8, 0.36, "Banco Sintetico S.A. CNPJ 00.000.000/0001-00"],
         ]
     )
+    blocks = [r for r in regions if r["kind"] == "block"]
+    assert [b["section"] for b in blocks] == ["intermediary"]
+    assert blocks[0]["recommended"]
     protected = protected_cells(regions)
-    assert any("Empresa Sintetica" in r["text"] for r in protected)
-    assert any("Rua Comercial" in r["text"] for r in protected)
+    assert not any("Empresa Sintetica" in r["text"] for r in protected)
+    assert not any("Rua Comercial" in r["text"] for r in protected)
     assert not any("Pessoa Sintetica" in r["text"] for r in protected)
-    assert not any("Rua Privada" in r["text"] for r in protected)
+    assert any("Banco Sintetico" in r["text"] for r in protected)
 
 
 def test_embedded_scan_strips_are_not_offered_as_photo_masks():
