@@ -3,12 +3,16 @@
 All values are synthetic. 529.982.247-25 is a public, checksum-valid test CPF.
 """
 
+import json
+
 from datajud_scraper.adhesion.privacy import (
+    ask_in_parts,
     build_regions,
     contract_text_cells,
     identifier_kinds,
     identifier_masks,
     lost_contract_lines,
+    parts,
     qr_masks,
     unreadable_native,
 )
@@ -123,6 +127,13 @@ def test_masked_clause_is_reported_as_lost_but_masked_name_is_not():
     ]
 
 
+def test_masked_court_footer_is_not_reported_as_lost_contract_text():
+    stamp = words_of("Código de validação do documento: a ser validado no sítio do PROJUDI", y=0.95)
+    signer = words_of("Assinado eletronicamente por: de acordo com o sistema do tribunal", y=0.97)
+    masks = [{"rect": [0.0, 0.94, 1.0, 0.99], "category": "footer", "origin": "automatic"}]
+    assert lost_contract_lines(stamp + signer, masks, []) == []
+
+
 def counter_page(number, text, counter):
     return {
         "page_number": number,
@@ -157,3 +168,26 @@ def test_continuation_of_a_rejected_document_is_audited_not_a_doubt():
     result = assemble_roles(pages, {1: "N", 2: "C", 3: "E"})
     assert result["excluded_continuations"] == [2, 3]
     assert not result["unresolved"]
+
+
+def test_dense_region_payload_is_split_and_a_small_one_keeps_one_request():
+    regions = [{"id": n, "text": "x" * 500} for n in range(400)]
+    chunks = parts(regions, 60000)
+    assert len(chunks) > 1 and [r for c in chunks for r in c] == regions
+
+    class Model:
+        def __init__(self):
+            self.contents = []
+
+        def ask(self, task, system, content, schema, images):
+            self.contents.append(content)
+            ids = [r["id"] for r in json.loads(content)["regions"]]
+            return {"remove": ids[:1], "uncertain": False}
+
+    model = Model()
+    answers = ask_in_parts(model, "t", "s", regions, lambda p: {"regions": p}, {}, [])
+    assert len(answers) == len(model.contents) > 1
+    assert all(len(c.encode()) < 78000 for c in model.contents)
+    small = Model()
+    ask_in_parts(small, "t", "s", regions[:3], lambda p: {"family": None, "regions": p}, {}, [])
+    assert small.contents == [json.dumps({"family": None, "regions": regions[:3]})]

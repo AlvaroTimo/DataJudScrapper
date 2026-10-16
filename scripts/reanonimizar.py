@@ -45,15 +45,17 @@ def main():
             document = json.loads(Path(path).read_text())["document_id"]
             model.cache = workspace(root) / "model-cache" / document
             started = time.monotonic()
-            result = anonymize_extraction(root, path, model, config, role="scraper")
-            summary.append(
-                {
-                    "position": position,
-                    "process_number": process,
-                    "extraction_manifest": path,
-                    "anonymization_manifest": result["manifest_path"],
-                    "status": result["status"],
-                    "instruments": [
+            record = {"position": position, "process_number": process, "extraction_manifest": path}
+            try:
+                result = anonymize_extraction(root, path, model, config, role="scraper")
+            except Exception as error:  # one dense or broken page must not stop the batch
+                record.update(status="error", error=f"{type(error).__name__}: {error}")
+                record["instruments"] = []
+            else:
+                record.update(
+                    anonymization_manifest=result["manifest_path"],
+                    status=result["status"],
+                    instruments=[
                         {
                             "contract_id": i["contract_id"],
                             "status": i["status"],
@@ -61,10 +63,11 @@ def main():
                         }
                         for i in result["instruments"]
                     ],
-                    "seconds": round(time.monotonic() - started, 1),
-                }
-            )
-            print(json.dumps(summary[-1], ensure_ascii=False), flush=True)
+                )
+            record["seconds"] = round(time.monotonic() - started, 1)
+            summary.append(record)
+            print(json.dumps(record, ensure_ascii=False), flush=True)
+            args.output.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
         model.close()
     args.output.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
 

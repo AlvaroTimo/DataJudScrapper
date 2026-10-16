@@ -863,11 +863,38 @@ def lost_contract_lines(words, masks, regions):
             continue  # names and headings are judged by the model and the review
         if PERSONAL_LABEL.search(text) or INTERMEDIARY.search(text) or identifier_kinds(text):
             continue
+        if FOOTER.search(text) or "projudi" in text:
+            continue  # the court stamp is not contract wording
         if any(in_rect(line["rect"], b["rect"]) for b in blocks):
             continue
         if covered_fraction(line["rect"], erasing) >= 0.3:
             lost.append({"rect": line["rect"], "text": line["text"][:160]})
     return lost
+
+
+INPUT_LIMIT = 45000  # bytes; keeps dense pages inside the model context (24576 tokens)
+
+
+def parts(items, budget):
+    """Split a region payload so each part's JSON fits the model input limit."""
+    result, current, size = [], [], 2
+    for item in items:
+        length = len(json.dumps(item, ensure_ascii=False).encode()) + 2
+        if current and size + length > budget:
+            result.append(current)
+            current, size = [], 2
+        current.append(item)
+        size += length
+    return [*result, current] if current or not result else result
+
+
+def ask_in_parts(model, task, system, items, wrap, schema, images):
+    """One answer per part of a dense page; a page that fits keeps its single request."""
+    budget = INPUT_LIMIT - len((system + json.dumps(schema)).encode()) - 200
+    return [
+        model.ask(task, system, json.dumps(wrap(part), ensure_ascii=False), schema, images)
+        for part in parts(items, budget)
+    ]
 
 
 def anonymize(model, image, page, folder):
@@ -904,13 +931,22 @@ def anonymize(model, image, page, folder):
         "required": ["remove", "uncertain"],
         "additionalProperties": False,
     }
-    content = json.dumps(
-        {"family": page.get("family"), "regions": region_payload(regions)}, ensure_ascii=False
-    )
     original_image = image_bytes(image, 2000)
-    response = model.ask("adhesion_blocks_v1", MASK_PROMPT, content, schema, [original_image])
-    if type(response.get("uncertain")) is not bool:
+    answers = ask_in_parts(
+        model,
+        "adhesion_blocks_v1",
+        MASK_PROMPT,
+        region_payload(regions),
+        lambda part: {"family": page.get("family"), "regions": part},
+        schema,
+        [original_image],
+    )
+    if any(type(a.get("uncertain")) is not bool for a in answers):
         raise ValueError("missing source uncertainty")
+    response = {
+        "remove": [i for a in answers for i in a.get("remove") or []],
+        "uncertain": any(a["uncertain"] for a in answers),
+    }
     masks = selected_masks(response.get("remove"), regions)
     # Judicial footer location is deterministic; it must not depend on the model.
     mandatory = [r["id"] for r in regions if r["kind"] in ("footer", "block") and r["recommended"]]
@@ -940,13 +976,22 @@ def anonymize(model, image, page, folder):
         # Deterministic residual checks on the cleaned pixels, independent of the model.
         residual_identifiers = identifier_masks(after_words) + qr_masks(after_regions)
         cleaned_image = image_bytes(cleaned, 2000)
-        audit = model.ask(
+        checks = ask_in_parts(
+            model,
             "adhesion_cleaned_only_v2",
             RESIDUAL_PROMPT,
-            json.dumps(region_payload(after_regions, semantic_hints=True), ensure_ascii=False),
+            region_payload(after_regions, semantic_hints=True),
+            lambda part: part,
             audit_schema,
             [cleaned_image],
         )
+        if any(type(c.get(k)) is not bool for c in checks for k in ("pii_remaining", "uncertain")):
+            raise ValueError("invalid privacy audit")
+        audit = {
+            "pii_remaining": any(c.get("pii_remaining") for c in checks),
+            "uncertain": any(c.get("uncertain") for c in checks),
+            "repair_ids": [i for c in checks for i in c.get("repair_ids") or []],
+        }
         preservation = model.ask(
             "adhesion_preservation_v2",
             PRESERVATION_PROMPT,
