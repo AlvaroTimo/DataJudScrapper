@@ -3,11 +3,16 @@
 Extraction is reused as-is (its signature excludes privacy.py), so this measures
 anonymization changes in minutes instead of a full re-extraction. Outputs go to new
 run folders; previous runs, releases and sources are left untouched.
+
+When --output already holds a summary, the contracts it anonymized are kept and skipped,
+so the script can run again while extraction is still adding cases (errors are retried).
+A lock on the summary makes concurrent runs wait for each other instead of colliding.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import time
 from pathlib import Path
@@ -24,16 +29,22 @@ def main():
     parser.add_argument("--local-model", default="qwen3-vl:8b-instruct-q8_0")
     parser.add_argument("--local-context-tokens", type=int, default=24576)
     parser.add_argument("--output", type=Path, required=True, help="JSON summary of the new runs")
+    parser.add_argument("--fresh", action="store_true", help="ignore a previous summary")
     args = parser.parse_args()
     root = args.storage_root.resolve()
+    lock = args.output.with_suffix(".lock").open("w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    previous = [] if args.fresh or not args.output.exists() else json.loads(args.output.read_text())
+    summary = [e for e in previous if e["status"] != "error"]
+    done = {e["extraction_manifest"] for e in summary}
     manifests = []
     for line in (root / "reports" / args.batch_id / "results.jsonl").read_text().splitlines():
         entry = json.loads(line)
         phases = (entry["result"].get("contract_processing") or {}).get("phases", {})
         path = phases.get("extraction", {}).get("manifest_path")
-        if path and json.loads(Path(path).read_text())["instruments"]:
+        if path and path not in done and json.loads(Path(path).read_text())["instruments"]:
             manifests.append((entry["position"], entry["process_number"], path))
-    summary = []
+    print(f"{len(summary)} ya anonimizados; {len(manifests)} por anonimizar", flush=True)
     with workspace_scope(root, "adhesion-scraper"):
         model = LocalModel(
             workspace(root) / "model-cache" / "preflight",
