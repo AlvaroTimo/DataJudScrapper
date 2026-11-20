@@ -1,10 +1,3 @@
-"""Move PDFs whose text is identical to another PDF of the same subfolder into OUT/duplicated/<sub>/.
-
-usage: uv run --with pymupdf python scripts/limpio/dedup.py OUT
-Idempotent: considers PDFs already in duplicated/ too, keeps the lowest name of each group in OUT/<sub>/
-and rewrites duplicated/<sub>/duplicados.md.
-"""
-
 import collections
 import glob
 import hashlib

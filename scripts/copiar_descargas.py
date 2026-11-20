@@ -1,8 +1,3 @@
-"""Copy downloaded PDFs into the sample folder as NNN_<process>.pdf.
-
-usage: python3 scripts/copiar_descargas.py POSITIONS.json STORAGE_ROOT [DEST]
-"""
-
 import glob
 import json
 import os

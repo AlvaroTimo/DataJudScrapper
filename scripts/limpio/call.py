@@ -1,10 +1,3 @@
-"""Transcribe one scanned document with a single stateless Claude Code call (no tools, images inline).
-
-usage: uv run --with reportlab --with pymupdf python scripts/limpio/call.py PDF OUTDIR [--mode strips|halves] [--dpi 250]
-Needs the `claude` CLI signed in (`claude auth login`). Writes OUTDIR/<NAME>.txt (markup),
-<NAME>.notes.md, <NAME>.usage.json and <NAME>.raw.txt.
-"""
-
 import argparse
 import base64
 import io
@@ -18,8 +11,6 @@ import pymupdf
 from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BRIEF = open(os.path.join(HERE, "brief.md"), encoding="utf-8").read()
-
 
 def page_images(page, mode, dpi):
     """4 overlapping strips (scans) or 2 overlapping halves (clean digital prints)."""
@@ -29,12 +20,10 @@ def page_images(page, mode, dpi):
     step, ov = im.height // k, int(dpi * 0.3)
     return [im.crop((0, max(0, i * step - ov), im.width, min(im.height, (i + 1) * step + ov))) for i in range(k)]
 
-
 def b64(img):
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return base64.b64encode(buf.getvalue()).decode()
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -43,7 +32,9 @@ def main():
     ap.add_argument("--mode", default="strips", choices=["strips", "halves"])
     ap.add_argument("--dpi", type=int, default=250)
     ap.add_argument("--model", default="claude-opus-5-5")
+    ap.add_argument("--brief", default=os.path.join(HERE, "brief_v2.md"))
     a = ap.parse_args()
+    BRIEF = open(a.brief, encoding="utf-8").read()
     name = os.path.basename(a.pdf)[:-4]
     os.makedirs(a.outdir, exist_ok=True)
     doc = pymupdf.open(a.pdf)
@@ -75,7 +66,6 @@ def main():
                "usage": u}, open(f"{a.outdir}/{name}.usage.json", "w"), indent=1)
     print(f"{name}: {len(doc)}p in={u.get('input_tokens')} cw={u.get('cache_creation_input_tokens')} "
           f"cr={u.get('cache_read_input_tokens')} out={u.get('output_tokens')} {time.time() - t0:.0f}s")
-
 
 if __name__ == "__main__":
     main()

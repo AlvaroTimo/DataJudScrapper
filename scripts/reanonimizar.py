@@ -1,14 +1,3 @@
-"""Re-run only the anonymization phase on the contracts already extracted in a batch.
-
-Extraction is reused as-is (its signature excludes privacy.py), so this measures
-anonymization changes in minutes instead of a full re-extraction. Outputs go to new
-run folders; previous runs, releases and sources are left untouched.
-
-When --output already holds a summary, the contracts it anonymized are kept and skipped,
-so the script can run again while extraction is still adding cases (errors are retried).
-A lock on the summary makes concurrent runs wait for each other instead of colliding.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -21,9 +10,8 @@ from datajud_scraper.adhesion.common import workspace, workspace_scope
 from datajud_scraper.adhesion.local_model import LocalModel
 from datajud_scraper.adhesion.pipeline import anonymize_extraction, configuration
 
-
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Re-run only the anonymization phase on the contracts already extracted in a batch.\n\nExtraction is reused as-is (its signature excludes privacy.py), so this measures\nanonymization changes in minutes instead of a full re-extraction. Outputs go to new\nrun folders; previous runs, releases and sources are left untouched.\n\nWhen --output already holds a summary, the contracts it anonymized are kept and skipped,\nso the script can run again while extraction is still adding cases (errors are retried).\nA lock on the summary makes concurrent runs wait for each other instead of colliding.')
     parser.add_argument("batch_id")
     parser.add_argument("--storage-root", type=Path, default=Path("data"))
     parser.add_argument("--local-model", default="qwen3-vl:8b-instruct-q8_0")
@@ -81,7 +69,6 @@ def main():
             args.output.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
         model.close()
     args.output.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
-
 
 if __name__ == "__main__":
     main()

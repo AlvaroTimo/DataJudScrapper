@@ -1,14 +1,3 @@
-"""Genera data/Contratos/procesos.csv: una fila por número de proceso.
-
-Cruza los contratos de data/Contratos/<carpeta>/ con su petição inicial, contestação y
-decisões usando los manifiestos de extraer_peticao.py, extraer_contestacao.py y
-extraer_decisiones.py. Las columnas con varios valores son arrays JSON de strings.
-"contratos" lleva cada contrato con su carpeta ("indices/NNN_..._pA-B.pdf"); los demás
-archivos van sin ruta y están en data/Contratos/<carpeta>/<Subcarpeta>/.
-
-usage: python3 scripts/generar_procesos_csv.py
-"""
-
 import csv
 import json
 import os
@@ -23,10 +12,8 @@ MANIFIESTOS = {
 COLUMNAS = ["proceso", "carpetas", "n_contratos", "contratos", "peticao", "contestacao",
             "n_decisiones", "decisiones", "resultados", "estado_decision", "resultado_final"]
 
-
 def leer(ruta):
     return [json.loads(linea) for linea in open(ruta)]
-
 
 def unicos(salidas):
     """Un archivo por documento (mismo Id = misma pieza copiada junto a varios contratos)."""
@@ -34,7 +21,6 @@ def unicos(salidas):
     for s in salidas:
         vistos.setdefault(s["id"], s)
     return list(vistos.values())
-
 
 def main():
     procesos = {}
@@ -71,7 +57,6 @@ def main():
                 "resultado_final": p["resultado_final"],
             })
     print(f"escrito {SALIDA}: {len(procesos)} procesos")
-
 
 if __name__ == "__main__":
     main()

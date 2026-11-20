@@ -1,15 +1,3 @@
-"""Anonymized copy of a report, split like data/output/reportN, with the counts.
-
-- data/output_anonim/reportN/{indices,primera_pagina,buscar_texto}/  terms anonymized by
-  the pipeline (scripts/reanonimizar.py summary), each in the folder of how it was found
-- data/output_anonim/reportN/contratos_genericos/  the bank's generic card contracts: no
-  client data, so only the court stamp at the foot of each page is covered
-- data/output_anonim/reportN/resumen.md
-
-"Anonymized" counts accepted (completed) plus needs_review: needs_review means the
-automatic checks still have doubts, not that the page is wrong, and it is listed apart.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -25,10 +13,8 @@ from datajud_scraper.adhesion.common import workspace_scope
 
 STAMP = ("assinado eletronicamente", "codigo de validacao", "projudi")
 
-
 def plain(text):
     return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
-
 
 def cover_stamp(page):
     """Black out the court stamp lines (signer name, validation code) at the page foot."""
@@ -49,9 +35,8 @@ def cover_stamp(page):
     page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_PIXELS)
     return True
 
-
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Anonymized copy of a report, split like data/output/reportN, with the counts.\n\n- data/output_anonim/reportN/{indices,primera_pagina,buscar_texto}/  terms anonymized by\n  the pipeline (scripts/reanonimizar.py summary), each in the folder of how it was found\n- data/output_anonim/reportN/contratos_genericos/  the bank\'s generic card contracts: no\n  client data, so only the court stamp at the foot of each page is covered\n- data/output_anonim/reportN/resumen.md\n\n"Anonymized" counts accepted (completed) plus needs_review: needs_review means the\nautomatic checks still have doubts, not that the page is wrong, and it is listed apart.')
     parser.add_argument("summary", type=Path, help="JSON written by scripts/reanonimizar.py")
     parser.add_argument("batch_id")
     parser.add_argument("--report", required=True, help="e.g. report3")
@@ -131,7 +116,6 @@ def main():
     ]
     (folder / "resumen.md").write_text("\n".join(summary) + "\n")
     print(folder)
-
 
 if __name__ == "__main__":
     main()

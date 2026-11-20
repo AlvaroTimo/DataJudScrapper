@@ -1,22 +1,3 @@
-"""Render a transcription markup file (.txt) into a clean A4 PDF.
-
-Markup (one block per line; blank lines ignored; lines starting with '%' are comments):
-  @title TEXT          title, centered, bold 14 (consecutive lines = one title block)
-  @sec TEXT            section heading, bold 12
-  @cl TEXT             clause heading on its own line, bold 11
-  @sub TEXT            subclause heading on its own line, bold italic 11
-  @clp HEAD | TEXT     paragraph opening with a bold clause number/heading
-  @subp HEAD | TEXT    paragraph opening with a bold-italic subclause number/heading
-  @p TEXT              body paragraph (justified)
-  @f TEXT              form field / short line (left aligned), e.g. "Nome:"
-  @i1 LABEL | TEXT     item, hanging indent depth 1 (also @i2, @i3, @i4)
-  @ip1 TEXT            continuation paragraph inside an item of depth 1 (also @ip2...)
-Inline: **bold**, *italic*, ***bold italic***, \\* literal asterisk, {{original||corrected}} for an
-obvious error fix, […] for cuts.
-
-usage: render.py IN.txt OUT.pdf [--literal]
-"""
-
 import re
 import sys
 
@@ -56,10 +37,8 @@ S = {
 }
 FIX = r"\{\{(.*?)\|\|(.*?)\}\}"
 
-
 def _fallback_font(ch):
     return "FallbackSerif" if ord(ch) in _SERIF_CMAP else "FallbackSans"
-
 
 def _winansi(ch):
     try:
@@ -68,11 +47,9 @@ def _winansi(ch):
     except UnicodeEncodeError:
         return False
 
-
 def fallback(s):
     """Wrap characters Times (WinAnsi) cannot show in an embedded font."""
     return "".join(ch if _winansi(ch) else f'<font name="{_fallback_font(ch)}">{ch}</font>' for ch in s)
-
 
 def inline(s, literal, fixes):
     def fix(m):
@@ -86,18 +63,15 @@ def inline(s, literal, fixes):
     s = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<i>\1</i>", s)
     return fallback(s).replace("\x00", "*")
 
-
 def _sep(rest):
     """Index of the HEAD/LABEL separator '|', ignoring the '||' inside {{orig||fix}}."""
     return re.sub(r"\{\{.*?\}\}", lambda m: "#" * len(m.group(0)), rest).find("|")
-
 
 def split_head(rest, tag, n):
     i = _sep(rest)
     if i < 0:
         raise ValueError(f"line {n}: @{tag} needs 'HEAD | TEXT'")
     return rest[:i].strip(), rest[i + 1:].strip()
-
 
 def build(src, out, literal=False):
     fixes, flow, title_buf = [], [], []
@@ -125,7 +99,6 @@ def build(src, out, literal=False):
             raise ValueError(f"line {n}: missing tag: {line[:60]}")
         items.append((n, m.group(1), m.group(2).strip()))
 
-    # label column width per depth, shared by each run of consecutive items
     col, run_max = {}, {}
     for idx, (n, tag, rest) in enumerate(items):
         if re.fullmatch(r"i\d", tag):
@@ -180,7 +153,6 @@ def build(src, out, literal=False):
     SimpleDocTemplate(out, pagesize=A4, leftMargin=MARGIN, rightMargin=MARGIN, topMargin=MARGIN,
                       bottomMargin=MARGIN, title="", author="").build(flow)
     return fixes
-
 
 if __name__ == "__main__":
     for o, c in build(sys.argv[1], sys.argv[2], literal="--literal" in sys.argv):

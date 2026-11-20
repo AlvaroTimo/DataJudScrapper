@@ -1,12 +1,3 @@
-"""Transcribe a share of each subfolder (pixel-identical scans transcribed once), then build PDFs.
-
-usage: uv run --with reportlab --with pymupdf python scripts/limpio/run_batch.py SRC TRANS OUT [--half 1|2|all] [--workers 6]
-  SRC   input folder with subfolders (buscar_texto, contratos_genericos, indices, primera_pagina)
-  TRANS where markup is kept (resumable: documents with a .usage.json are skipped)
-  OUT   output folder for PDFs (OUT/<sub>/<name>.pdf); duplicates are sorted out by dedup.py afterwards
-If the plan's usage limit is reached, workers pause and retry every 10 minutes, then continue.
-"""
-
 import argparse
 import collections
 import concurrent.futures as cf
@@ -32,14 +23,12 @@ ap.add_argument("--half", default="all", choices=["1", "2", "all"])
 ap.add_argument("--workers", type=int, default=6)
 ap.add_argument("--take", default="", help="sub=N,... : only the first N selected documents of each subfolder")
 ap.add_argument("--pause", type=float, default=10)
+ap.add_argument("--brief", default=os.path.join(HERE, "brief_v2.md"))
 a = ap.parse_args()
-
 
 def log(msg):
     print(f"{time.strftime('%H:%M')} {msg}", flush=True)
 
-
-# 1. select documents and group pixel-identical scans (first name in a group = the one transcribed)
 jobs, copies = [], []  # jobs: (sub, rep); copies: (sub, dup, rep)
 for sub in SUBS:
     files = sorted(glob.glob(f"{a.src}/{sub}/*.pdf"))
@@ -64,20 +53,16 @@ for sub in SUBS:
 todo = [(s, n) for s, n in jobs if not os.path.exists(f"{a.trans}/{s}/{n}.usage.json")]
 log(f"{len(jobs) + len(copies)} documents ({len(copies)} identical copies), {len(todo)} to transcribe")
 
-# 2. transcribe, pausing on usage limits
 paused, probe = threading.Event(), threading.Lock()
-
 
 def limited(out):
     return any(k in out.lower() for k in ("limit", "rate_limit", "overloaded", "429", "529"))
 
-
 def call(sub, n):
     r = subprocess.run([sys.executable, os.path.join(HERE, "call.py"), f"{a.src}/{sub}/{n}.pdf",
-                        f"{a.trans}/{sub}", "--mode", "strips", "--dpi", "250"], capture_output=True, text=True)
+                        f"{a.trans}/{sub}", "--mode", "strips", "--dpi", "250", "--brief", a.brief], capture_output=True, text=True)
     out = (r.stdout + r.stderr).strip()
     return r.returncode, ("limit: " + out[-300:]) if r.returncode and limited(out) else out[-300:]
-
 
 def one(job):
     while True:
@@ -103,14 +88,12 @@ def one(job):
             continue
         return job, rc, out
 
-
 fails = 0
 with cf.ThreadPoolExecutor(a.workers) as ex:
     for job, rc, out in ex.map(one, todo):
         log(("OK   " if rc == 0 else "FAIL ") + out)
         fails += rc != 0
 
-# 3. copies of identical scans reuse the transcription; render every selected document
 for sub, dup, rep in copies:
     for ext in (".txt", ".notes.md"):
         if os.path.exists(f"{a.trans}/{sub}/{rep}{ext}"):

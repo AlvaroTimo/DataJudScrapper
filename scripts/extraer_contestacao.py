@@ -1,22 +1,3 @@
-"""Extrae la contestación de cada contrato a partir del expediente completo.
-
-Para cada contrato en data/Contratos/<carpeta>/NNN_<proceso>_pA-B.pdf busca el
-expediente data/dataset-contracts/<n>_<proceso>.pdf (cruce por número de proceso) y localiza la contestación con:
-  - el "Índice de Documentos" de las primeras páginas (Id -> Tipo), y
-  - el pie de cada página "Id. <id> - Pág. <n>" (página -> Id).
-Si el proceso tiene varias, elige la presentada junto con el contrato (misma fecha
-y hora en el índice); si no, la última anterior al contrato; si el contrato vino con
-la petición inicial, la primera posterior. Puntúa nombre del archivo, texto de la primera
-página y tipo del índice para separar la pieza de defensa de sus anexos, y descarta
-réplicas/impugnaciones.
-
-Salida, con la misma estructura de carpetas que data/Contratos:
-  data/Contestacao/<carpeta>/<contrato>__contestacao_<id>_pX-Y.pdf
-  data/Contestacao/manifiesto.jsonl   (una línea por contrato)
-
-usage: .venv/bin/python scripts/extraer_contestacao.py [--tipos "Contestação,Sentença"]
-"""
-
 import argparse
 import json
 import os
@@ -48,10 +29,8 @@ TIPOS_CONOCIDOS = [
     "Alvará", "Outros",
 ]
 
-
 def sin_acentos(s):
     return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
-
 
 def leer_indice(ruta):
     """Filas del índice: [{id, fecha, nombre, tipo}] en orden."""
@@ -70,7 +49,6 @@ def leer_indice(ruta):
         filas.append({"id": m.group(1), "fecha": m.group(2), "nombre": nombre, "tipo": tipo})
     return filas
 
-
 def paginas_por_documento(doc):
     """Id de documento -> lista de páginas (1-based), usando el pie de página."""
     ids = []
@@ -79,7 +57,6 @@ def paginas_por_documento(doc):
         txt = page.get_text(clip=fitz.Rect(0, r.height * 0.8, r.width, r.height))
         m = PIE.findall(txt) or PIE.findall(page.get_text())
         ids.append(m[-1][0] if m else None)
-    # páginas sin pie entre dos páginas del mismo documento
     for i in range(1, len(ids) - 1):
         if ids[i] is None and ids[i - 1] and ids[i - 1] == ids[i + 1]:
             ids[i] = ids[i - 1]
@@ -89,10 +66,7 @@ def paginas_por_documento(doc):
             paginas.setdefault(d, []).append(i)
     return ids, paginas
 
-
-# réplicas de la parte demandante que mencionan la contestación
 NO_CONTESTACION = re.compile(r"(impugna|replica|manifesta|resposta|sobre|juntada)\w*\W+(\w+\W+){0,5}contesta")
-
 
 def puntaje_contestacion(fila, doc, paginas):
     """Señales de que el documento es la pieza de contestación (no un anexo).
@@ -120,14 +94,12 @@ def puntaje_contestacion(fila, doc, paginas):
     puntaje = 4 * ("nombre" in senales) + 2 * ("texto" in senales) + ("tipo" in senales)
     return puntaje, "+".join(senales)
 
-
 def mejores(candidatas):
     """Se queda con las de mayor puntaje (la pieza de defensa frente a sus anexos)."""
     if not candidatas:
         return []
     p = max(x["puntaje"] for x in candidatas)
     return [x for x in candidatas if x["puntaje"] == p]
-
 
 def rangos(pags):
     """[89, 90, 91, 95] -> [(89, 91), (95, 95)]"""
@@ -138,7 +110,6 @@ def rangos(pags):
         else:
             out.append([p, p])
     return [tuple(r) for r in out]
-
 
 def procesar_expediente(args):
     """Procesa todos los contratos de un mismo expediente."""
@@ -168,7 +139,6 @@ def procesar_expediente(args):
             elegidas = mejores([x for x in candidatas if x["fecha"] == fila_contrato["fecha"]])
             vinculo = "misma_presentacion" if elegidas else None
             if len(elegidas) > 1:
-                # la misma pieza repetida: la que precede al contrato (es su anexo)
                 previas = [x for x in elegidas if x["paginas"][0] < c["pagina_inicio"]]
                 elegidas = [previas[-1] if previas else elegidas[0]]
         if not elegidas:
@@ -176,7 +146,6 @@ def procesar_expediente(args):
             if previas:
                 elegidas, vinculo = [previas[-1]], "anterior_al_contrato"
         if not elegidas and candidatas:
-            # el contrato vino con la petición inicial: contestaciones posteriores
             elegidas, vinculo = mejores(candidatas)[:1], "posterior_al_contrato"
         r["vinculo"] = vinculo
         r["estado"] = "ok" if elegidas else "sin_contestacion"
@@ -196,7 +165,6 @@ def procesar_expediente(args):
         resultados.append(r)
     doc.close()
     return resultados
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -243,7 +211,6 @@ def main():
         print(f"{carpeta:22} {len(rs):9} {ok:17} {len(rs) - ok:5}")
     print("estados:", dict(Counter(r["estado"] for r in resultados)))
     print("vínculo:", dict(Counter(r["vinculo"] for r in resultados)))
-
 
 if __name__ == "__main__":
     main()

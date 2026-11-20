@@ -1,9 +1,3 @@
-"""Install a pinned, user-local Ollama runtime and pull the document vision model.
-
-No root, shell installer, system service, cloud inference, or global Python packages.
-The runtime and model cache can be reused by other projects.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -22,9 +16,8 @@ ARCHIVE_SHA256 = "e155b83589986d2c581fdbf1381ea3ebdb16549883679cd5a0627f7cdc05b1
 URL = f"https://github.com/ollama/ollama/releases/download/v{VERSION}/ollama-linux-amd64.tar.zst"
 DEFAULT_MODEL = "qwen3.5:27b"
 
-
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Install a pinned, user-local Ollama runtime and pull the document vision model.\n\nNo root, shell installer, system service, cloud inference, or global Python packages.\nThe runtime and model cache can be reused by other projects.')
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--port", type=int, default=11434)
     args = parser.parse_args()
@@ -117,7 +110,6 @@ def main():
     }
     (cache / "local-model.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest), flush=True)
-
 
 if __name__ == "__main__":
     main()

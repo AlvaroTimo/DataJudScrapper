@@ -1,19 +1,11 @@
-"""Write a subset of the dataset keeping only expedientes filed up to a given year.
-
-Older expedientes usually already contain the bank's defence, which is where the adhesion
-contract is attached; recent ones often hold only the initial claim. Lines are copied
-verbatim and the metadata counts that scrape-dataset validates are recomputed.
-"""
-
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
 
-
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Write a subset of the dataset keeping only expedientes filed up to a given year.\n\nOlder expedientes usually already contain the bank's defence, which is where the adhesion\ncontract is attached; recent ones often hold only the initial claim. Lines are copied\nverbatim and the metadata counts that scrape-dataset validates are recomputed.")
     parser.add_argument("--hasta-anio", type=int, required=True)
     parser.add_argument("--dataset", type=Path, default=Path("external/dataset/dataset.jsonl"))
     parser.add_argument("--output-dir", type=Path, default=Path("data/datasets"))
@@ -50,7 +42,6 @@ def main():
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     print(f"{args.output_dir / stem}.jsonl: {len(records)} expedientes")
-
 
 if __name__ == "__main__":
     main()

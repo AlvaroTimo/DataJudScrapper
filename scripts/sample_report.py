@@ -47,17 +47,14 @@ MANUAL_COLUMNS = [
 YES = {"si", "sí", "s", "yes", "y", "1", "x", "ok"}
 NO = {"no", "n", "0"}
 
-
 def seconds(manifest):
     if not manifest or not manifest.get("finished_at"):
         return None
     start = datetime.fromisoformat(manifest["started_at"])
     return round((datetime.fromisoformat(manifest["finished_at"]) - start).total_seconds(), 1)
 
-
 def moment(value):
     return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
-
 
 def phase_manifest(folder: Path, phase, runs):
     """The phase manifest of this batch item, not of another batch over the same PDF.
@@ -85,7 +82,6 @@ def phase_manifest(folder: Path, phase, runs):
     ]
     return max(manifests, key=lambda m: moment(m["started_at"]), default=None)
 
-
 def model_label(work: Path, signature):
     path = work / "extraction-configurations" / f"{signature}.json"
     if not signature or not path.is_file():
@@ -93,7 +89,6 @@ def model_label(work: Path, signature):
     config = json.loads(path.read_text())
     context = (config.get("inference") or {}).get("num_ctx")
     return f"{config.get('model')} · contexto {context} tokens" if context else config.get("model")
-
 
 def page_problems(decision):
     checks = decision.get("checks", {})
@@ -111,18 +106,15 @@ def page_problems(decision):
         problems.append("mascara_sobre_contenido_protegido")
     return problems
 
-
 def count(value):
     try:
         return int(str(value or "0").strip())
     except ValueError:
         return 0
 
-
 def answer(value):
     value = (value or "").strip().lower()
     return True if value in YES else False if value in NO else None
-
 
 def stats(values):
     values = [v for v in values if v is not None]
@@ -132,7 +124,6 @@ def stats(values):
         f"media {statistics.mean(values):.0f} s · mediana {statistics.median(values):.0f} s · "
         f"máx {max(values):.0f} s · total {sum(values) / 60:.1f} min (n={len(values)})"
     )
-
 
 def build_rows(root: Path, batch_id: str):
     results = root / "reports" / batch_id / "results.jsonl"
@@ -183,7 +174,6 @@ def build_rows(root: Path, batch_id: str):
                 error_extraccion=extraction.get("error_type", ""),
                 contratos_extraidos=len(extraction["instruments"]),
                 seg_extraccion=seconds(extraction),
-                # Not exported to the sheet: inputs for the pipeline report.
                 motivos=sorted({u["reason"] for u in detection.get("unresolved", [])}),
                 modelo=model_label(work, extraction.get("configuration_sha256")),
             )
@@ -222,12 +212,10 @@ def build_rows(root: Path, batch_id: str):
             rows.append(row)
     return rows, documents
 
-
 def merge_manual(rows, path: Path):
     if not path.exists():
         return
     with path.open(newline="", encoding="utf-8-sig") as stream:
-        # Spreadsheets in es/pt locales may save the sheet back with semicolons.
         delimiter = ";" if ";" in stream.readline().split(",")[0] else ","
         stream.seek(0)
         previous = {
@@ -238,7 +226,6 @@ def merge_manual(rows, path: Path):
         old = previous.get((row["proceso"], row.get("contrato_id", "")), {})
         for column in MANUAL_COLUMNS:
             row[column] = old.get(column, "")
-
 
 REASONS = {
     "visual_uncertainty": "páginas dudosas: el modelo no decide si son contrato",
@@ -251,7 +238,6 @@ REASONS = {
 }
 REFERENCE = Path("evaluacion") / "referencia_contratos.json"
 
-
 def reference(root: Path):
     """Which expedientes really contain an adhesion contract, if someone labelled them."""
     path = root / REFERENCE
@@ -259,7 +245,6 @@ def reference(root: Path):
         return None, None
     data = json.loads(path.read_text())
     return data["expedientes"], data.get("fuente", "")
-
 
 def pipeline_report(rows, documents, root: Path):
     def pct(part, whole):
@@ -392,7 +377,6 @@ def pipeline_report(rows, documents, root: Path):
     ]
     return lines
 
-
 def automatic_summary(rows, documents):
     lines = ["## Resultados automáticos del pipeline", ""]
     lines.append(f"- Expedientes en la muestra: **{len(documents)}**")
@@ -449,7 +433,6 @@ def automatic_summary(rows, documents):
         "tener datos personales residuales o contenido borrado.",
     ]
     return lines
-
 
 def manual_summary(rows):
     reviewed = [r for r in rows if any(r.get(c) for c in MANUAL_COLUMNS)]
@@ -508,7 +491,6 @@ def manual_summary(rows):
     ]
     return lines
 
-
 def batch_model(root: Path, batch_id: str):
     for line in (root / "reports" / batch_id / "results.jsonl").read_text().splitlines():
         phase = (json.loads(line)["result"].get("contract_processing") or {}).get("phases", {})
@@ -517,7 +499,6 @@ def batch_model(root: Path, batch_id: str):
             signature = json.loads(path.read_text()).get("configuration_sha256")
             return model_label(root / WORKSPACE, signature)
     return None
-
 
 def register(root: Path, batch_id: str) -> Path:
     """Stable sequential names next to the scraper's UUID folders: reportes/reporte_N.
@@ -565,7 +546,6 @@ def register(root: Path, batch_id: str) -> Path:
     (folder / "indice.md").write_text("\n".join(lines) + "\n")
     return folder / f"reporte_{index[batch_id]}"
 
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("batch_id")
@@ -590,7 +570,6 @@ def main():
     print(sheet)
     print(output / "resumen.md")
     print(f"{register(root, args.batch_id)}  (último: {root / 'reportes' / 'ultimo'})")
-
 
 if __name__ == "__main__":
     main()

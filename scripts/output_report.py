@@ -1,22 +1,3 @@
-"""Simple extraction-only output of a batch, comparable across runs.
-
-- data/output/100-pdfs/                  the input expedientes, shared by every report
-- data/output/reportN/well-extracted/    every contract the pipeline extracted, split by
-                                         how it was found: indices/ (the annex title in the
-                                         index), primera_pagina/ (the annex first page),
-                                         buscar_texto/ (keyword search in other annexes),
-                                         contratos_genericos/ (text rule, no model)
-- data/output/reportN/poorly-extracted/  expedientes with no contract extracted, split by
-                                         why: no_esta_en_el_pdf/ (no page mentions a term),
-                                         documentos_parecidos/ (pages titled like a term that
-                                         are not one), solo_mencionado/ (only cited in the
-                                         text), falla_descarga/ (the PDF was not downloaded)
-                                         In expedientes without a term, a whole annex that
-                                         is the bank's generic card contract also counts.
-
-Real contracts come from data/evaluacion/referencia_contratos.json. Anonymization is ignored.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -38,13 +19,11 @@ SCOPE = {
     "out_of_scope_instrument",
 }
 
-
 ROUTES = ("indices", "primera_pagina", "buscar_texto", "contratos_genericos")
 MISSING = ("no_esta_en_el_pdf", "documentos_parecidos", "solo_mencionado", "falla_descarga")
 MENTION = re.compile(r"(?:termo|proposta|contrato) de ades[a4]o")
 CARD = re.compile(r"cart[a4]o")
 GENERIC = re.compile(r"^contrato do cartao(?: de credito)?\b")
-
 
 def generic_contracts(root: Path, source):
     """Annexes opening with the bank's generic card contract (Nubank, Itaucard, PAN)."""
@@ -62,7 +41,6 @@ def generic_contracts(root: Path, source):
                 found.append((first, last))
     return found
 
-
 def why_missing(root: Path, source):
     """Why no contract came out: never mentioned, only cited, or look-alike documents."""
     mentioned = False
@@ -73,7 +51,6 @@ def why_missing(root: Path, source):
             text = heading_text(page) + " " + body_text(page)
             mentioned = mentioned or bool(MENTION.search(text) and CARD.search(text))
     return "solo_mencionado" if mentioned else "no_esta_en_el_pdf"
-
 
 def route(detection, pages):
     """How the pipeline reached a contract: its annex title, its first page or the text."""
@@ -92,14 +69,11 @@ def route(detection, pages):
     )
     return "indices" if annex and annex["score"] >= 4 else "primera_pagina"
 
-
 def place(source: Path, target: Path):
     shutil.copy2(source, target)
 
-
 def span(pages):
     return f"p{pages[0]}-{pages[-1]}" if len(pages) > 1 else f"p{pages[0]}"
-
 
 def runs(pages):
     """Contiguous page ranges, so a PDF part can be built with a few inserts."""
@@ -111,9 +85,8 @@ def runs(pages):
             result.append([number, number])
     return result
 
-
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Simple extraction-only output of a batch, comparable across runs.\n\n- data/output/100-pdfs/                  the input expedientes, shared by every report\n- data/output/reportN/well-extracted/    every contract the pipeline extracted, split by\n                                         how it was found: indices/ (the annex title in the\n                                         index), primera_pagina/ (the annex first page),\n                                         buscar_texto/ (keyword search in other annexes),\n                                         contratos_genericos/ (text rule, no model)\n- data/output/reportN/poorly-extracted/  expedientes with no contract extracted, split by\n                                         why: no_esta_en_el_pdf/ (no page mentions a term),\n                                         documentos_parecidos/ (pages titled like a term that\n                                         are not one), solo_mencionado/ (only cited in the\n                                         text), falla_descarga/ (the PDF was not downloaded)\n                                         In expedientes without a term, a whole annex that\n                                         is the bank's generic card contract also counts.\n\nReal contracts come from data/evaluacion/referencia_contratos.json. Anonymization is ignored.")
     parser.add_argument("batch_id")
     parser.add_argument("--storage-root", type=Path, default=Path("data"))
     parser.add_argument("--inputs", default="100-pdfs", help="shared folder of input PDFs")
@@ -138,7 +111,6 @@ def main():
     )
     batch = json.loads((root / "reports" / args.batch_id / "summary.json").read_text())
     total = len(entries)
-    # Recovery is measured against the reference only when it labels the whole sample.
     labelled = all(e["process_number"] in truth for e in entries)
     real = extracted = contracts = 0
     rows, misses, routes = [], [], []
@@ -258,7 +230,6 @@ def main():
     ]
     (folder / "resumen.md").write_text("\n".join(summary) + "\n")
     print(folder)
-
 
 if __name__ == "__main__":
     main()

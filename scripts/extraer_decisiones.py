@@ -1,26 +1,3 @@
-"""Extrae la decisión judicial (sentencia / acórdão) de cada contrato.
-
-Para cada contrato en data/Contratos/<carpeta>/NNN_<proceso>_pA-B.pdf busca su
-expediente completo en data/dataset-contracts (cruce por número de proceso) y
-localiza los documentos del juez con el índice y el pie "Id. <id> - Pág. <n>"
-(ver extraer_contestacao.py).
-
-En PROJUDI las sentencias quedan casi siempre como tipo "Conclusão"; también se
-consideran "Sentença", "Acórdão", "Decisão" y "Despacho". Un documento cuenta como
-decisión si el juez decide en primera persona ("julgo improcedentes", "nego
-provimento", "homologo o acordo"...). El resultado sale de la ÚLTIMA de esas frases,
-que es el dispositivo; así no se confunde con la jurisprudencia citada. Se ignoran
-las decisiones de embargos de declaração y los avisos "sob pena de extinção".
-Los procesos sin decisión que el juez suspendió (temas repetitivos 1.328 y 1.414 del
-STJ, IRDR 20 del TJBA, sobre cartão RMC/RCC) quedan con estado "suspendido".
-
-Salida, con la misma estructura de carpetas que data/Contratos:
-  data/Decision/<carpeta>/<contrato>__decision_<instancia>_<resultado>_<id>_pX-Y.pdf
-  data/Decision/manifiesto.jsonl   (una línea por contrato)
-
-usage: .venv/bin/python scripts/extraer_decisiones.py
-"""
-
 import argparse
 import json
 import os
@@ -34,9 +11,7 @@ from extraer_contestacao import (CARPETAS, CONTRATO, CONTRATOS, EXPEDIENTES, fit
 SALIDA = "data/Decision"
 TIPOS_JUEZ = {"Conclusão", "Sentença", "Acórdão", "Decisão", "Despacho"}
 
-# "julgo ..." o "extingo o processo com resolução do mérito, para julgar ..."
 JULGO = r"(julgo|merito\W+(\w+\W+){0,3}para\s+julgar)\s+"
-# frases del juez en primera persona -> resultado (el orden importa: parcial antes que procedente)
 RESULTADOS = [
     ("recurso_parcialmente_provido", r"(dou|dar)\s+(parcial\s+provimento|provimento\s+parcial)"),
     ("recurso_provido", r"(dou|dar)\s+provimento"),
@@ -57,10 +32,8 @@ TEMAS = {"STJ 1.328": re.compile(r"\b1\.?328\b"), "STJ 1.414": re.compile(r"\b1\
          "IRDR 20 TJBA": re.compile(r"irdr\W+(\w+\W+){0,3}20\b|tema\s+(irdr\s+)?(n\.?o?\s*)?20\b")}
 TRANSITO = re.compile(r"transitou\s+em\s+julgado|certifico\W+(\w+\W+){0,15}transito\s+em\s+julgado")
 
-
 def texto(doc, pags):
     return re.sub(r"\s+", " ", sin_acentos(" ".join(doc[p - 1].get_text() for p in pags)))
-
 
 def clasificar(t):
     """(resultado, fragmento del dispositivo) o (None, None)."""
@@ -72,7 +45,6 @@ def clasificar(t):
     if not ultimo:
         return None, None
     return ultimo.lastgroup, t[max(0, ultimo.start() - 150): ultimo.end() + 250].strip()
-
 
 def procesar_expediente(args):
     ruta, contratos = args
@@ -95,7 +67,6 @@ def procesar_expediente(args):
         if SUSPENSION.search(t):
             temas |= {k for k, v in TEMAS.items() if v.search(t)} or {"otro"}
         resultado, fragmento = clasificar(t)
-        # "Sentença" a veces es una orden de suspensión o resuelve embargos: no es el resultado
         if (resultado is None and f["tipo"] in ("Sentença", "Acórdão")
                 and not SUSPENSION.search(t) and "embargos" not in t):
             resultado = "no_identificado"
@@ -128,7 +99,6 @@ def procesar_expediente(args):
         resultados.append(r)
     doc.close()
     return resultados
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -171,7 +141,6 @@ def main():
     print("estados:", dict(Counter(r["estado"] for r in resultados)))
     print("resultado final:", dict(Counter(r["resultado_final"] for r in resultados)))
     print("con trânsito em julgado:", sum(r["transito_em_julgado"] for r in resultados))
-
 
 if __name__ == "__main__":
     main()

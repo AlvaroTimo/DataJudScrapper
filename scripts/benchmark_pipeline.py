@@ -1,10 +1,3 @@
-"""Benchmark downloaded PDFs in an isolated workspace; never contacts the court.
-
-Cold means no inventory, extraction, inference or output cache for the measured run.
-OS disk caching and Ollama's in-memory model state are not reset. Model metadata lookup
-and backend-reported loading durations are measured separately.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -30,7 +23,6 @@ from datajud_scraper.adhesion.resources import resource_scope, worker_limit
 from datajud_scraper.adhesion.text import DEFAULT_TESSDATA, page_inventory
 from datajud_scraper.adhesion.vision import detect_with_model
 from datajud_scraper.pdf_validation import hash_file, validate_pdf
-
 
 def synthetic_source(root, folder, *, scanned=False, seed=0):
     """A fictitious positive exercises actual extraction and privacy, not model mocks."""
@@ -92,7 +84,6 @@ def synthetic_source(root, folder, *, scanned=False, seed=0):
         "fixture_footer_rects": footer_rects,
     }
 
-
 def synthetic_checks(root, source, result):
     """Verify known fictitious identifiers and clauses against output pixels independently."""
     import numpy as np
@@ -127,9 +118,8 @@ def synthetic_checks(root, source, result):
     )
     return checks
 
-
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Benchmark downloaded PDFs in an isolated workspace; never contacts the court.\n\nCold means no inventory, extraction, inference or output cache for the measured run.\nOS disk caching and Ollama's in-memory model state are not reset. Model metadata lookup\nand backend-reported loading durations are measured separately.")
     parser.add_argument("--storage-root", type=Path, default=Path("data"))
     parser.add_argument("--document-id", action="append")
     parser.add_argument("--synthetic-positive", choices=("native", "scanned"))
@@ -330,7 +320,6 @@ def main(argv=None):
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(measurements, indent=2) + "\n")
-
 
 if __name__ == "__main__":
     main()

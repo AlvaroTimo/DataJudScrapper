@@ -1,11 +1,3 @@
-"""Genera data/Contratos/resumen_procesamiento.pdf: contratos, contestações e decisões por pasta.
-
-Lee data/Contratos (únicos), data/0.duplicated (duplicados) y los manifiestos de
-data/Contestacao y data/Decision (ver extraer_contestacao.py y extraer_decisiones.py).
-
-usage: uv run --no-project --with reportlab python scripts/resumen_procesamiento.py
-"""
-
 import json
 import os
 import re
@@ -47,18 +39,14 @@ TIPOS_DECISION = [
     ("recurso_no_provido", "a Turma Recursal rejeita o recurso: a sentença de primeiro grau é mantida."),
 ]
 
-
 def pdfs(carpeta):
     return [f for f in os.listdir(carpeta) if f.endswith(".pdf")] if os.path.isdir(carpeta) else []
-
 
 def procesos(archivos):
     return {m.group(0) for f in archivos if (m := PROCESO.search(f))}
 
-
 def manifiesto(ruta):
     return [json.loads(linea) for linea in open(ruta)]
-
 
 def tabla(grupos, cabecera, filas, anchos):
     """grupos: [(texto, col_inicio, col_fin)]; una línea vertical antes de cada grupo."""
@@ -87,7 +75,6 @@ def tabla(grupos, cabecera, filas, anchos):
     t = Table(datos, colWidths=[w * cm for w in anchos], repeatRows=2)
     t.setStyle(TableStyle(estilo))
     return t
-
 
 def main():
     unicos = {c: pdfs(f"data/Contratos/{c}") for c in CARPETAS}
@@ -179,7 +166,6 @@ def main():
     SimpleDocTemplate(SALIDA, pagesize=A4, leftMargin=1.8 * cm, rightMargin=1.8 * cm,
                       topMargin=2 * cm, bottomMargin=2 * cm).build(story)
     print("escrito", SALIDA)
-
 
 if __name__ == "__main__":
     main()
