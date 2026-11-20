@@ -1,89 +1,87 @@
-# Makefile: pipeline de contratos
+# Makefile: contract pipeline
 
-Todo el flujo se lanza desde la raíz del proyecto con `make`. Hay dos tipos de tarea:
+The whole workflow runs from the project root with `make`. There are two kinds of task:
 
-- **Tareas únicas:** hacen un solo paso (`make filter`, `make render`…).
-- **Pipelines:** encadenan tareas en orden (`make pipeline`, `make standardize`).
+- **Single tasks:** do one step (`make filter`, `make render`, ...).
+- **Pipelines:** chain tasks in order (`make pipeline-full`, `make pipeline-standardize`).
 
-Los parámetros se pasan desde la línea de comandos: `make <tarea> VARIABLE=valor`.
+Parameters are passed on the command line: `make <task> VARIABLE=value`.
 
-## Uso rápido
+## Quick start
 
 ```bash
-make help                                  # lista de tareas
-make filter YEAR=2024                      # filtra el dataset por año
-make extract-process-numbers               # genera procesos.csv
-make anonymize BATCH=<batch_id>            # anonimiza un lote ya extraído
-make standardize CONFIRM=1                 # transcribe, genera PDFs y separa duplicados
-make pipeline CONFIRM=1 BATCH=<batch_id>   # flujo completo, en orden
+make help                                            # list of tasks
+make filter YEAR=2024                                # filter the dataset by year
+make extract-process-numbers                         # generate procesos.csv
+make anonymize BATCH=<batch_id>                      # anonymize an already extracted batch
+make pipeline-standardize CONFIRM=1                  # transcribe, build PDFs, split duplicates
+make pipeline-full CONFIRM=1 BATCH=<batch_id>        # full workflow, in order
 ```
 
-## Parámetros
+## Parameters
 
-| Variable | Valor por defecto | Para qué |
+| Variable | Default | Purpose |
 |---|---|---|
-| `YEAR` | `2024` | Año límite para `filter` (expedientes presentados hasta ese año). |
-| `DATASET` | `data/output/datasets/dataset_hasta2024.jsonl` | Dataset de origen. |
-| `FILTERED` | `data/output/datasets/dataset_hasta$(YEAR).jsonl` | Dataset filtrado que usan `extract-contracts`. |
-| `BATCH` | (vacío) | Identificador del lote para `anonymize`. Obligatorio ahí. |
-| `MODEL` | `qwen3-vl:8b-instruct-q8_0` | Modelo local (Ollama) para extracción y anonimización. |
-| `CONTEXT` | `24576` | Tokens de contexto del modelo local. |
-| `TRANS_DIR` | `data/output/transcripciones` | Dónde se guardan las transcripciones. |
-| `CONTRATOS` | `data/Contratos` | Raíz de la estructura final. |
-| `DUPLICADOS` | `data/_duplicated_` | Carpeta de duplicados. |
-| `CONFIRM` | (vacío) | Tareas que gastan tokens del plan piden `CONFIRM=1`. |
+| `YEAR` | `2024` | Cutoff year for `filter` (cases filed up to that year). |
+| `DATASET` | `data/output/datasets/dataset_hasta2024.jsonl` | Source dataset. |
+| `FILTERED` | `data/output/datasets/dataset_hasta$(YEAR).jsonl` | Filtered dataset used by `extract-contracts`. |
+| `BATCH` | (empty) | Batch identifier for `anonymize`. Required there. |
+| `MODEL` | `qwen3-vl:8b-instruct-q8_0` | Local model (Ollama) for extraction and anonymization. |
+| `CONTEXT` | `24576` | Context tokens for the local model. |
+| `TRANS_DIR` | `data/output/transcripciones` | Where transcriptions are stored. |
+| `CONTRATOS` | `data/Contratos` | Root of the final structure. |
+| `DUPLICADOS` | `data/_duplicated_` | Duplicates folder. |
+| `CONFIRM` | (empty) | Tasks that spend plan tokens require `CONFIRM=1`. |
 
-## Tareas únicas
+## Single tasks
 
-| Tarea | Qué hace | Script | Gasta tokens |
+| Task | What it does | Script | Spends tokens |
 |---|---|---|---|
-| `filter` | Deja solo los expedientes hasta `YEAR`. | `scripts/filter_dataset.py` | No |
-| `extract-process-numbers` | Genera `procesos.csv`: un proceso por fila, con sus contratos, contestações, decisiones y petição. | `scripts/generate_process_csv.py` | No |
-| `extract-contracts` | Extrae los contratos de los expedientes filtrados, sin anonimizar. Usa el scraper en modo `extract`. | `datajud-scraper scrape-dataset` | No (usa el modelo local) |
-| `anonymize` | Anonimiza un lote ya extraído y genera `data/output_anonim/`. | `scripts/reanonymize.py`, `scripts/output_anonymized.py` | No (usa el modelo local) |
-| `transcribe` | Transcribe cada contrato con Claude, en el formato estándar. | `scripts/contract_transcription/transcribe_batch.py` | **Sí** (`CONFIRM=1`) |
-| `render` | Convierte cada transcripción en un PDF en `Contratos/Processed/`. | `scripts/contract_transcription/render_pdf.py` | No |
-| `dedupe` | Separa los PDFs con el mismo texto en `_duplicated_/`. | `scripts/contract_transcription/find_duplicates.py` | No |
-| `summarize` | Resúmenes de contrato y de caso. | — | **Sí** |
+| `filter` | Keeps only the cases up to `YEAR`. | `scripts/filter_dataset.py` | No |
+| `extract-process-numbers` | Generates `procesos.csv`: one case per row, with its contracts, defenses (contestações), decisions and initial petition. | `scripts/generate_process_csv.py` | No |
+| `extract-contracts` | Extracts the contracts of the filtered cases, without anonymizing. Uses the scraper in `extract` mode. | `datajud-scraper scrape-dataset` | No (uses the local model) |
+| `anonymize` | Anonymizes an already extracted batch and writes `data/output_anonim/`. | `scripts/reanonymize.py`, `scripts/output_anonymized.py` | No (uses the local model) |
+| `transcribe` | Transcribes each contract with Claude, in the standard format. | `scripts/contract_transcription/transcribe_batch.py` | **Yes** (`CONFIRM=1`) |
+| `render` | Converts each transcription into a PDF in `Contratos/Processed/`. | `scripts/contract_transcription/render_pdf.py` | No |
+| `dedupe` | Moves PDFs with the same text into `_duplicated_/`. | `scripts/contract_transcription/find_duplicates.py` | No |
 
 ## Pipelines
 
-| Pipeline | Tareas, en orden | Gasta tokens |
+| Pipeline | Tasks, in order | Spends tokens |
 |---|---|---|
-| `standardize` | `transcribe` → `render` → `dedupe` | Sí (`CONFIRM=1`) |
-| `pipeline` | `filter` → `extract-process-numbers` → `extract-contracts` → `anonymize` → `standardize` | Sí (`CONFIRM=1`) |
+| `pipeline-standardize` | `transcribe` → `render` → `dedupe` | Yes (`CONFIRM=1`) |
+| `pipeline-full` | `filter` → `extract-process-numbers` → `extract-contracts` → `anonymize` → `pipeline-standardize` | Yes (`CONFIRM=1`) |
 
-`make pipeline` **no** incluye `summarize`, porque todavía no está disponible (ver pendientes).
+`make pipeline-full` no longer includes summaries: that script was removed.
 
-## Estructura de salida
+## Output structure
 
-Todo queda dentro de estas cinco carpetas:
+Everything lives inside these five folders:
 
 ```
 data/
-├── _duplicated_/            duplicados por texto (PDFs)
-├── Contratos/               estructura final
-│   ├── Contratos/           contratos originales (escaneos de entrada)
-│   ├── Processed/           PDFs estandarizados
-│   ├── Peticao/             petições iniciais
-│   ├── Contestacao/         contestações
-│   ├── Decision/            decisiones
-│   ├── Resumenes/           resúmenes (Contratos/, Casos/, Peticao/, Contestacao/, Decision/)
+├── _duplicated_/            duplicates by text (PDFs)
+├── Contratos/               final structure
+│   ├── Contratos/           original contracts (scanned inputs)
+│   ├── Processed/           standardized PDFs
+│   ├── Peticao/             initial petitions
+│   ├── Contestacao/         defenses (contestações)
+│   ├── Decision/            decisions
+│   ├── Resumenes/           summaries (Contratos/, Casos/, Peticao/, Contestacao/, Decision/)
 │   ├── procesos.csv
 │   └── resumen_procesamiento.pdf
-├── dataset-contracts/       PDFs de los expedientes descargados
-├── output/                  extracción, transcripciones y datasets de trabajo
-└── output_anonim/           contratos anonimizados (reportN/)
+├── dataset-contracts/       PDFs of the downloaded cases
+├── output/                  extraction, transcriptions and working datasets
+└── output_anonim/           anonymized contracts (reportN/)
 ```
 
-## Pendientes
+## Pending
 
-1. **`transcribe` necesita las páginas de cada contrato** en `data/recreacion_v2/src/` (o la carpeta que se indique). Ese paso de extracción de páginas se hizo con código suelto y no está en un script; hay que añadirlo antes de poder reproducir la transcripción desde cero.
-2. **`summarize` no está disponible.** El script `resumir.py` está en `scripts/_muertos/` y depende de `data/backup/Resumenes_v1/`, que ya no existe. Hay que restaurarlo y cambiar esa dependencia, si se van a generar resúmenes nuevos.
-3. **`anonymize` depende de la ruta del lote.** Espera `data/output/runs/<BATCH>/anonimizacion.json`; hay que confirmar que `reanonymize.py` escribe ahí.
-4. **Los filtros de `filter` por defecto** (`YEAR=2024`) son una suposición: confirma el año que quieres.
+1. **`transcribe` needs the pages of each contract** in `data/recreacion_v2/src/` (or the folder passed in). That page-extraction step was done with loose code and is not in a script; it has to be added before the transcription can be reproduced from scratch.
+2. **`anonymize` depends on the batch path.** It expects `data/output/runs/<BATCH>/anonimizacion.json`; confirm that `reanonymize.py` writes there.
+3. **The `filter` default (`YEAR=2024`) is an assumption.** Confirm the year you want.
 
-## Notas
+## Notes
 
-- Las tareas que gastan tokens se detienen si no pasas `CONFIRM=1`, para no lanzarlas por accidente.
-- Para ver qué haría una tarea sin ejecutarla: `make -n <tarea>`.
+- Tasks that spend tokens stop unless you pass `CONFIRM=1`, so they are not launched by accident.
+- To see what a task would do without running it: `make -n <task>`.

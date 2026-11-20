@@ -18,7 +18,7 @@ DUPLICADOS ?= data/_duplicated_
 
 .DEFAULT_GOAL := help
 .PHONY: help filter extract-process-numbers extract-contracts anonymize \
-        transcribe render dedupe standardize summarize pipeline check-confirm
+        transcribe render dedupe pipeline-standardize pipeline-full check-confirm
 
 help: ## Muestra las tareas disponibles
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-24s %s\n", $$1, $$2}'
@@ -50,15 +50,12 @@ render: ## Convierte la transcripción en PDF estandarizado
 dedupe: ## Separa los PDFs con el mismo texto en _duplicated_
 	$(PY) scripts/contract_transcription/find_duplicates.py $(CONTRATOS)
 
-summarize: ## Resúmenes de contrato y de caso (pendiente: ver Makefile.md)
-	@echo "Pendiente: resumir.py está en scripts/_muertos y depende de data/backup/, que ya no existe."
-	@exit 1
 
 check-confirm:
 	@test -n "$(CONFIRM)" || (echo "Esta tarea gasta tokens del plan. Repite con CONFIRM=1."; exit 1)
 
 # --- Pipelines ---------------------------------------------------------------
 
-standardize: check-confirm transcribe render dedupe ## Transcribe, genera PDFs y separa duplicados
+pipeline-standardize: check-confirm transcribe render dedupe ## Transcribe, genera PDFs y separa duplicados
 
-pipeline: check-confirm filter extract-process-numbers extract-contracts anonymize standardize ## Todo el flujo, en orden (CONFIRM=1)
+pipeline-full: check-confirm filter extract-process-numbers extract-contracts anonymize pipeline-standardize ## Todo el flujo, en orden (CONFIRM=1)
