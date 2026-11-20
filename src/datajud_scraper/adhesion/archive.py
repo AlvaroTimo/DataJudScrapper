@@ -79,7 +79,7 @@ def archive(root, *, destination=None):
     destination = Path(destination) if destination else root / "backups" / stamp
     destination = destination.resolve()
     if not destination.is_relative_to(root / "backups"):
-        raise ValueError("backup must be inside data/backups")
+        raise ValueError("backup must be inside the storage root backups folder")
     destination.mkdir(parents=True, exist_ok=True, mode=0o700)
     journal_path = destination / "archive.json"
     with StorageLock(root / "state/scraper.lock", timeout_seconds=0):

@@ -32,7 +32,7 @@ def main():
     ap.add_argument("--mode", default="strips", choices=["strips", "halves"])
     ap.add_argument("--dpi", type=int, default=250)
     ap.add_argument("--model", default="claude-opus-5-5")
-    ap.add_argument("--brief", default=os.path.join(HERE, "brief_v2.md"))
+    ap.add_argument("--brief", default=os.path.join(HERE, "transcription_brief.md"))
     a = ap.parse_args()
     BRIEF = open(a.brief, encoding="utf-8").read()
     name = os.path.basename(a.pdf)[:-4]

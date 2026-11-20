@@ -20,9 +20,9 @@ def isolated_environment(monkeypatch):
             monkeypatch.delenv(name)
 
 
-def test_default_storage_is_data_in_working_directory(tmp_path, monkeypatch) -> None:
+def test_default_storage_is_output_scraper_in_working_directory(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    assert ScraperConfig.from_env().storage_root == tmp_path / "data"
+    assert ScraperConfig.from_env().storage_root == tmp_path / "data" / "output" / "scraper"
     assert ScraperConfig.from_env().contract_mode == "both"
     assert ScraperConfig.from_env().contract_retention == "purge"
 

@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
-DEFAULT_STORAGE_ROOT = Path("data")
+DEFAULT_STORAGE_ROOT = Path("data/output/scraper")
 DEFAULT_USER_AGENT = "DataJudScraper/0.1 (responsible PROJUDI/TJBA client)"
 
 

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Resume a paused batch started by scripts/run_completo.sh and finish it the same way:
+# Resume a paused batch started by scripts/run_full_pipeline.sh and finish it the same way:
 # wait for PROJUDI and resume (again after every new outage, retrying failed cases),
 # rewrite data/output/REPORT and
 # anonymize into data/output_anonim/REPORT.
-#   setsid nohup scripts/reanudar_completo.sh BATCH_ID report4 >/dev/null 2>&1 &
+#   setsid nohup scripts/resume_full_pipeline.sh BATCH_ID report4 >/dev/null 2>&1 &
 set -uo pipefail
 cd "$(dirname "$0")/.."
 BATCH=$1
 REPORT=$2
 MODEL="${MODEL:-qwen3-vl:8b-instruct-q8_0}"
 CONTEXT="${CONTEXT:-24576}"
-RUN_DIR="$(dirname "$(grep -l "$BATCH" data/runs/*/batch_id.txt | head -1)")/"
+RUN_DIR="$(dirname "$(grep -l "$BATCH" data/output/runs/*/batch_id.txt | head -1)")/"
 LOG="${RUN_DIR}ejecucion.log"
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 INPUTS=$(grep -o 'entrada en `../[^/`]*/`' "data/output/$REPORT/resumen.md" | sed 's#.*\.\./\(.*\)/`#\1#')
@@ -48,9 +48,9 @@ fi
 .venv/bin/python scripts/output_report.py "$BATCH" --inputs "$INPUTS" --report "$REPORT" \
   2>&1 | grep -v "MuPDF error" | tee -a "$LOG"
 log "Anonimización del lote $BATCH → data/output_anonim/$REPORT"
-"${INHIBIT[@]}" .venv/bin/python scripts/reanonimizar.py "$BATCH" \
+"${INHIBIT[@]}" .venv/bin/python scripts/reanonymize.py "$BATCH" \
   --output "${RUN_DIR}anonimizacion.json" --local-model "$MODEL" \
   --local-context-tokens "$CONTEXT" 2>&1 | tee -a "$LOG"
-.venv/bin/python scripts/output_anonim.py "${RUN_DIR}anonimizacion.json" "$BATCH" \
+.venv/bin/python scripts/output_anonymized.py "${RUN_DIR}anonimizacion.json" "$BATCH" \
   --report "$REPORT" 2>&1 | grep -v "MuPDF error" | tee -a "$LOG"
 log "Fin: data/output/$REPORT y data/output_anonim/$REPORT"

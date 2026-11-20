@@ -6,8 +6,8 @@ CONTRATOS = "data/Contratos"
 SALIDA = os.path.join(CONTRATOS, "procesos.csv")
 MANIFIESTOS = {
     "peticao": os.path.join(CONTRATOS, "manifiesto_peticao.jsonl"),
-    "contestacao": "data/Contestacao/manifiesto.jsonl",
-    "decision": "data/Decision/manifiesto.jsonl",
+    "contestacao": "data/Contratos/Contestacao/manifiesto.jsonl",
+    "decision": "data/Contratos/Decision/manifiesto.jsonl",
 }
 COLUMNAS = ["proceso", "carpetas", "n_contratos", "contratos", "peticao", "contestacao",
             "n_decisiones", "decisiones", "resultados", "estado_decision", "resultado_final"]

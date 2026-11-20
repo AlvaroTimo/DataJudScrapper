@@ -23,7 +23,7 @@ ap.add_argument("--half", default="all", choices=["1", "2", "all"])
 ap.add_argument("--workers", type=int, default=6)
 ap.add_argument("--take", default="", help="sub=N,... : only the first N selected documents of each subfolder")
 ap.add_argument("--pause", type=float, default=10)
-ap.add_argument("--brief", default=os.path.join(HERE, "brief_v2.md"))
+ap.add_argument("--brief", default=os.path.join(HERE, "transcription_brief.md"))
 a = ap.parse_args()
 
 def log(msg):
@@ -59,7 +59,7 @@ def limited(out):
     return any(k in out.lower() for k in ("limit", "rate_limit", "overloaded", "429", "529"))
 
 def call(sub, n):
-    r = subprocess.run([sys.executable, os.path.join(HERE, "call.py"), f"{a.src}/{sub}/{n}.pdf",
+    r = subprocess.run([sys.executable, os.path.join(HERE, "transcribe_contract.py"), f"{a.src}/{sub}/{n}.pdf",
                         f"{a.trans}/{sub}", "--mode", "strips", "--dpi", "250", "--brief", a.brief], capture_output=True, text=True)
     out = (r.stdout + r.stderr).strip()
     return r.returncode, ("limit: " + out[-300:]) if r.returncode and limited(out) else out[-300:]

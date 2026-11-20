@@ -36,8 +36,8 @@ def cover_stamp(page):
     return True
 
 def main():
-    parser = argparse.ArgumentParser(description='Anonymized copy of a report, split like data/output/reportN, with the counts.\n\n- data/output_anonim/reportN/{indices,primera_pagina,buscar_texto}/  terms anonymized by\n  the pipeline (scripts/reanonimizar.py summary), each in the folder of how it was found\n- data/output_anonim/reportN/contratos_genericos/  the bank\'s generic card contracts: no\n  client data, so only the court stamp at the foot of each page is covered\n- data/output_anonim/reportN/resumen.md\n\n"Anonymized" counts accepted (completed) plus needs_review: needs_review means the\nautomatic checks still have doubts, not that the page is wrong, and it is listed apart.')
-    parser.add_argument("summary", type=Path, help="JSON written by scripts/reanonimizar.py")
+    parser = argparse.ArgumentParser(description='Anonymized copy of a report, split like data/output/reportN, with the counts.\n\n- data/output_anonim/reportN/{indices,primera_pagina,buscar_texto}/  terms anonymized by\n  the pipeline (scripts/reanonymize.py summary), each in the folder of how it was found\n- data/output_anonim/reportN/contratos_genericos/  the bank\'s generic card contracts: no\n  client data, so only the court stamp at the foot of each page is covered\n- data/output_anonim/reportN/resumen.md\n\n"Anonymized" counts accepted (completed) plus needs_review: needs_review means the\nautomatic checks still have doubts, not that the page is wrong, and it is listed apart.')
+    parser.add_argument("summary", type=Path, help="JSON written by scripts/reanonymize.py")
     parser.add_argument("batch_id")
     parser.add_argument("--report", required=True, help="e.g. report3")
     parser.add_argument("--storage-root", type=Path, default=Path("data"))

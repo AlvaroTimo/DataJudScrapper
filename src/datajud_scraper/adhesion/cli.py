@@ -11,7 +11,7 @@ from .common import read_json, readonly, workspace, workspace_scope
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--storage-root", type=Path, default=Path("data"))
+    parser.add_argument("--storage-root", type=Path, default=Path("data/output/scraper"))
     parser.add_argument("--workspace", default="adhesion-v1", help="isolated adhesion-* cohort")
     sub = parser.add_subparsers(dest="command", required=True)
     prepare = sub.add_parser(

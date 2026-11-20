@@ -9,7 +9,7 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
 
-CARPETAS = ["buscar_texto", "contratos_genericos", "indices", "primera_pagina"]
+CARPETAS = []
 PROCESO = re.compile(r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}")
 SALIDA = "data/Contratos/resumen_procesamiento.pdf"
 
@@ -46,7 +46,7 @@ def procesos(archivos):
     return {m.group(0) for f in archivos if (m := PROCESO.search(f))}
 
 def manifiesto(ruta):
-    return [json.loads(linea) for linea in open(ruta)]
+    return [json.loads(linea) for linea in open(ruta)] if os.path.exists(ruta) else []
 
 def tabla(grupos, cabecera, filas, anchos):
     """grupos: [(texto, col_inicio, col_fin)]; una línea vertical antes de cada grupo."""
@@ -76,20 +76,39 @@ def tabla(grupos, cabecera, filas, anchos):
     t.setStyle(TableStyle(estilo))
     return t
 
+def desde_csv(ruta="data/Contratos/procesos.csv"):
+    """Reconstruye contestação, decisão y petição por proceso a partir de procesos.csv (ya no hay manifiestos)."""
+    import csv
+    ids = lambda nombres: [{"id": m.group(1)} for n in nombres if (m := re.search(r"_(\d{8,10})_", n))]
+    cont, deci, peti = [], [], []
+    for r in csv.DictReader(open(ruta, encoding="utf-8")):
+        carpeta = "Total"
+        cs = json.loads(r["contestacao"] or "[]")
+        ds = json.loads(r["decisiones"] or "[]")
+        cont.append({"proceso": r["proceso"], "carpeta": carpeta, "salidas": ids(cs)})
+        deci.append({"proceso": r["proceso"], "carpeta": carpeta, "decisiones": ids(ds),
+                     "estado": r["estado_decision"]})
+        if r["peticao"]:
+            n = r["peticao"]
+            metodo = ("tomada_de_termo" if "tomada" in n.lower() else
+                      "nombre" if "taq" in n.lower() else "tipo")
+            peti.append({"proceso": r["proceso"], "carpeta": carpeta,
+                         "salidas": [{"id": m.group(1), "metodo": metodo,
+                                      "nombre_original": n} for m in [re.search(r"_(\d{8,10})_", n)] if m]})
+    return cont, deci, peti
+
 def main():
-    unicos = {c: pdfs(f"data/Contratos/{c}") for c in CARPETAS}
-    duplicados = {c: pdfs(f"data/0.duplicated/{c}") for c in CARPETAS}
-    contestacao = manifiesto("data/Contestacao/manifiesto.jsonl")
-    decision = manifiesto("data/Decision/manifiesto.jsonl")
-    peticao = manifiesto("data/Contratos/manifiesto_peticao.jsonl")
+    unicos = {"Total": pdfs("data/Contratos/Processed")}
+    duplicados = {"Total": pdfs("data/_duplicated_")}
+    contestacao, decision, peticao = desde_csv()
 
     def por_carpeta(rs, c):
         return rs if c == "Total" else [r for r in rs if r["carpeta"] == c]
 
     t1, t2, t3 = [], [], []
-    for c in CARPETAS + ["Total"]:
-        u = sum(unicos.values(), []) if c == "Total" else unicos[c]
-        d = sum(duplicados.values(), []) if c == "Total" else duplicados[c]
+    for c in ["Total"]:
+        u = unicos[c]
+        d = duplicados[c]
         n_proc = len(procesos(u))
         t1.append([c, n_proc, len(u) + len(d), len(u), len(d), 0])
 
@@ -120,7 +139,7 @@ def main():
         Paragraph("Detalhes", TITULO),
         Paragraph("Tabela 1: Contratos", SECCION),
         tabla([("Processos", 1, 1), ("Contratos (PDF)", 2, 5)],
-              ["Pasta (tipo de documento)", "Números de processo", "Processados (PDF)", "Únicos",
+              ["Tipo de documento", "Números de processo", "Processados (PDF)", "Únicos",
                "Duplicados", "Erros"],
               t1, [4.6, 2.6, 2.4, 2.0, 2.2, 1.6]),
 
@@ -131,7 +150,7 @@ def main():
         Paragraph(f"Os {tot2[4]} contratos sem contestação pertencem a processos em cujos autos não há "
                   "nenhuma contestação (o réu ainda não contestou ou não apresentou defesa).", TEXTO),
         tabla([("Processos", 1, 1), ("Contratos", 2, 4), ("Documentos extraídos", 5, 5)],
-              ["Pasta (tipo de documento)", "Números de processo", "Contratos", "Com contestação",
+              ["Tipo de documento", "Números de processo", "Contratos", "Com contestação",
                "Sem contestação", "Únicos"],
               t2, [4.6, 2.6, 2.2, 2.5, 2.5, 3.0]),
 
@@ -144,7 +163,7 @@ def main():
                   f"superior decida casos iguais ({tot3[4]}).", TEXTO),
         tabla([("Processos", 1, 1), ("Contratos", 2, 3), ("Contratos sem decisão", 4, 6),
                ("Documentos extraídos", 7, 7)],
-              ["Pasta (tipo de documento)", "Números de processo", "Contratos", "Com decisão",
+              ["Tipo de documento", "Números de processo", "Contratos", "Com decisão",
                "Suspensos*", "Sem sentença ainda", "Sem decisão", "Únicos"],
               t3, [3.5, 2.0, 1.9, 1.8, 2.0, 1.9, 1.8, 2.5]),
         Paragraph("* Suspensos: o juiz parou o processo até que um tribunal superior decida casos iguais. "
@@ -160,7 +179,7 @@ def main():
                   + (f". Em {n_outro}, a petição foi enviada num só arquivo junto com os documentos e "
                      "aparece como \"Documentos\"." if n_outro else "."), TEXTO),
         tabla([("Processos", 1, 1), ("Petição", 2, 2)],
-              ["Pasta (tipo de documento)", "Números de processo", "Petições"],
+              ["Tipo de documento", "Números de processo", "Petições"],
               t4, [6.0, 4.0, 4.0]),
     ]
     SimpleDocTemplate(SALIDA, pagesize=A4, leftMargin=1.8 * cm, rightMargin=1.8 * cm,
